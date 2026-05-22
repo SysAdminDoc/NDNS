@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.0
+// @version      3.4.1
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/main/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/main/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2259,11 +2259,15 @@ function addGlobalStyle(css) {
                 div.pe-1.list-group-item, .flex-grow-1.d-flex.gap-2.align-items-center, .d-flex.align-items-center,
                 .form-control, .list-group.list-group-flush, button.notranslate, span.d-none.d-lg-inline, button.dropdown-toggle {
                     background-color: #260600 !important;
+                    color: #f5d4d0 !important;
                 }
-                #root { background-color: #260600; border-style: none; }
-                div.pe-1.list-group-item { border-color: #5b0f00; }
-                div.mt-4 { background-color: #4d0e00; }
-                div.card-header, div.Header { background-color: #5b0f00; }
+                #root { background-color: #260600; border-style: none; color: #f5d4d0; }
+                div.pe-1.list-group-item { border-color: #5b0f00; color: #f5d4d0 !important; }
+                div.pe-1.list-group-item *, .list-group.list-group-flush * { color: #f5d4d0 !important; }
+                .form-control { color: #f5d4d0 !important; }
+                .form-control::placeholder { color: #c08680 !important; }
+                div.mt-4 { background-color: #4d0e00; color: #f5d4d0 !important; }
+                div.card-header, div.Header { background-color: #5b0f00; color: #f5d4d0 !important; }
                 button svg path { color: #ed8181; }
             `;
         } else if (isAllowlistPage) {
@@ -2271,11 +2275,15 @@ function addGlobalStyle(css) {
                 div.pe-1.list-group-item, .flex-grow-1.d-flex.gap-2.align-items-center, .d-flex.align-items-center,
                 .form-control, .list-group.list-group-flush, button.notranslate, span.d-none.d-lg-inline, button.dropdown-toggle {
                     background-color: #0a2915 !important;
+                    color: #d0eedd !important;
                 }
-                #root { background-color: #0a2915; border-style: none; }
-                div.pe-1.list-group-item { border-color: #134e27; }
-                div.mt-4 { background-color: #1b3b24; }
-                div.card-header, div.Header { background-color: #134e27; }
+                #root { background-color: #0a2915; border-style: none; color: #d0eedd; }
+                div.pe-1.list-group-item { border-color: #134e27; color: #d0eedd !important; }
+                div.pe-1.list-group-item *, .list-group.list-group-flush * { color: #d0eedd !important; }
+                .form-control { color: #d0eedd !important; }
+                .form-control::placeholder { color: #7fb997 !important; }
+                div.mt-4 { background-color: #1b3b24; color: #d0eedd !important; }
+                div.card-header, div.Header { background-color: #134e27; color: #d0eedd !important; }
                 button svg path { color: #81ed9d; }
             `;
         }
