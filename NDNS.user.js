@@ -2,8 +2,8 @@
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
 // @version      3.4.1
-// @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/main/NDNS.user.js
-// @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/main/NDNS.user.js
+// @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
+// @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
 // @author       Matt Parker, with community patches
 // @match        https://my.nextdns.io/*
