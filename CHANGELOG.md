@@ -2,6 +2,12 @@
 
 All notable changes to NDNS will be documented in this file.
 
+## [v3.4.2] - 2026-06-03
+
+### Fixed
+- **"Download Log" button fails** ([#3](https://github.com/SysAdminDoc/NDNS/issues/3)) — The NextDNS `/logs/download` endpoint 302-redirects to a pre-signed public file URL on a different host; following that redirect with the `X-Api-Key` header re-attached failed with "Failed to fetch", so both the panel **Download Log** action and the **HOSTS export** silently errored. Now requests `?redirect=0` to get the public file URL as JSON, then fetches that URL directly with no auth header. Shared via a new `fetchLogsCsv()` helper.
+- **Low-contrast secondary text** ([#2](https://github.com/SysAdminDoc/NDNS/issues/2)) — Panel footer, section labels, and muted metadata used `--panel-text-secondary` values that dropped below WCAG AA (4.5:1) once the common `opacity: 0.7` was applied. Darkened/lightened the secondary text token per theme (dark `#94a1b2`→`#c0c8d4`, light `#555b6e`→`#33384a`, dark-blue `#7a8a9a`→`#b2bdcb`), plus the dark-blue `.text-muted` override and the onboarding API-page link. All now clear AA, including at 0.7 opacity.
+
 ## [v3.4.1] - 2026-05-21
 
 ### Fixed
