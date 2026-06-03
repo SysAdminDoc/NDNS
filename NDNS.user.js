@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.1
+// @version      3.4.2
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1826,6 +1826,41 @@ function addGlobalStyle(css) {
         URL.revokeObjectURL(url);
     }
 
+    // --- Logs CSV fetch (redirect-safe) ---
+    // The NextDNS /logs/download endpoint 302-redirects to a pre-signed public
+    // file URL on a different host. Following that redirect with the X-Api-Key
+    // header re-attached fails ("Failed to fetch"). Use ?redirect=0 to get the
+    // public URL as JSON, then fetch that URL directly with no auth header.
+    function fetchLogsCsv(profileId) {
+        const gmRequest = (opts) => new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                onerror: () => reject(new Error('Network request failed')),
+                ontimeout: () => reject(new Error('Request timed out')),
+                ...opts
+            });
+        });
+
+        return gmRequest({
+            method: 'GET',
+            url: `https://api.nextdns.io/profiles/${profileId}/logs/download?redirect=0`,
+            headers: { 'X-Api-Key': NDNS_API_KEY },
+            responseType: 'json'
+        }).then((meta) => {
+            if (meta.status < 200 || meta.status >= 300) {
+                throw new Error(`API Error: ${meta.status}`);
+            }
+            const fileUrl = meta.response?.url || meta.response?.data?.url;
+            if (!fileUrl) throw new Error('No log file URL returned by API');
+            // Public pre-signed URL — must NOT send X-Api-Key (would be rejected).
+            return gmRequest({ method: 'GET', url: fileUrl });
+        }).then((file) => {
+            if (file.status < 200 || file.status >= 300) {
+                throw new Error(`Download Error: ${file.status}`);
+            }
+            return file.responseText;
+        });
+    }
+
     // --- NEW: Quick Actions from Panel (Download/Clear Logs) ---
     async function quickDownloadLogs() {
         const profileId = getCurrentProfileId();
@@ -1837,21 +1872,7 @@ function addGlobalStyle(css) {
         showToast('Downloading logs...', false, 2000);
 
         try {
-            const csvText = await new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: 'GET',
-                    url: `https://api.nextdns.io/profiles/${profileId}/logs/download`,
-                    headers: { 'X-Api-Key': NDNS_API_KEY },
-                    onload: (response) => {
-                        if (response.status >= 200 && response.status < 300) {
-                            resolve(response.responseText);
-                        } else {
-                            reject(new Error(`API Error: ${response.status}`));
-                        }
-                    },
-                    onerror: () => reject(new Error('Network request failed'))
-                });
-            });
+            const csvText = await fetchLogsCsv(profileId);
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
             downloadFile(csvText, `nextdns-logs-${profileId}-${timestamp}.csv`, 'text/csv');
             showToast('Logs downloaded successfully!');
@@ -3166,21 +3187,7 @@ function addGlobalStyle(css) {
         spinner.style.display = 'inline-block';
 
         try {
-            const csvText = await new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: 'GET',
-                    url: `https://api.nextdns.io/profiles/${profileId}/logs/download`,
-                    headers: { 'X-Api-Key': NDNS_API_KEY },
-                    onload: (response) => {
-                        if (response.status >= 200 && response.status < 300) {
-                            resolve(response.responseText);
-                        } else {
-                            reject(new Error(`API Request Failed: ${response.status}`));
-                        }
-                    },
-                    onerror: () => reject(new Error('Network request failed'))
-                });
-            });
+            const csvText = await fetchLogsCsv(profileId);
             const lines = csvText.trim().split('\n');
             const header = lines.shift().split(',').map(h => h.trim());
             const domainIndex = header.indexOf('domain');
@@ -4927,7 +4934,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4';
+        footer.textContent = 'NDNS v3.4.2';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
