@@ -178,7 +178,7 @@ function addGlobalStyle(css) {
             --panel-bg: rgba(22, 22, 26, 0.95);
             --panel-bg-solid: #16161a;
             --panel-text: #fffffe;
-            --panel-text-secondary: #94a1b2;
+            --panel-text-secondary: #c0c8d4;
             --panel-header-bg: rgba(32, 32, 38, 0.98);
             --panel-border: rgba(148, 161, 178, 0.1);
             --btn-bg: rgba(148, 161, 178, 0.1);
@@ -206,7 +206,7 @@ function addGlobalStyle(css) {
             --panel-bg: rgba(255, 255, 255, 0.95);
             --panel-bg-solid: #ffffff;
             --panel-text: #16161a;
-            --panel-text-secondary: #555b6e;
+            --panel-text-secondary: #33384a;
             --panel-header-bg: rgba(248, 249, 252, 0.98);
             --panel-border: rgba(22, 22, 26, 0.08);
             --btn-bg: rgba(22, 22, 26, 0.05);
@@ -229,7 +229,7 @@ function addGlobalStyle(css) {
             --panel-bg: rgba(25, 32, 40, 0.95);
             --panel-bg-solid: #192028;
             --panel-text: #e8f1ff;
-            --panel-text-secondary: #7a8a9a;
+            --panel-text-secondary: #b2bdcb;
             --panel-header-bg: rgba(31, 40, 51, 0.98);
             --panel-border: rgba(90, 155, 207, 0.12);
             --btn-bg: rgba(90, 155, 207, 0.1);
@@ -327,7 +327,7 @@ function addGlobalStyle(css) {
             color: #8ac7f4 !important;
         }
         html[data-ndns-theme="darkblue"] .text-muted {
-            color: #7a8a9a !important;
+            color: #b2bdcb !important;
         }
         html[data-ndns-theme="darkblue"] .settings-button path,
         html[data-ndns-theme="darkblue"] .stream-button path {
@@ -2075,7 +2075,7 @@ function addGlobalStyle(css) {
                     <input type="text" id="ndns-manual-api-input" placeholder="Paste API Key here...">
                 </div>
                 <button id="ndns-manual-api-submit" class="ndns-flashy-button">Accept API Key</button>
-                <a href="https://my.nextdns.io/${profileId}/api" target="_blank" style="display: block; font-size: 11px; color: #888; margin-top: 12px; text-decoration: underline;">Didn't copy the key? Click here to return to the API page.</a>
+                <a href="https://my.nextdns.io/${profileId}/api" target="_blank" style="display: block; font-size: 11px; color: #b0b0b0; margin-top: 12px; text-decoration: underline;">Didn't copy the key? Click here to return to the API page.</a>
             `;
         }
 
