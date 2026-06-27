@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.3
+// @version      3.4.4
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1403,6 +1403,55 @@ function addGlobalStyle(css) {
             color: var(--panel-text);
         }
 
+        /* Device Drill-down */
+        .ndns-device-drilldown {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 10px;
+        }
+        .ndns-device-card {
+            background: rgba(255,255,255,0.025); border: 1px solid var(--panel-border);
+            border-radius: 8px; padding: 12px; min-width: 0;
+        }
+        .ndns-device-head {
+            display: flex; align-items: flex-start; justify-content: space-between;
+            gap: 10px; margin-bottom: 10px;
+        }
+        .ndns-device-name {
+            color: var(--panel-text); font-size: 13px; font-weight: 700;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .ndns-device-meta {
+            color: var(--panel-text-secondary); font-size: 10px; margin-top: 2px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .ndns-device-count {
+            color: var(--panel-text-secondary); font-size: 11px; font-family: monospace;
+            white-space: nowrap;
+        }
+        .ndns-app-list { display: flex; flex-direction: column; gap: 8px; }
+        .ndns-app-row { display: grid; grid-template-columns: minmax(80px, 130px) 1fr auto; gap: 8px; align-items: center; }
+        .ndns-app-name {
+            color: var(--panel-text); font-size: 11px; font-weight: 600;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .ndns-app-track { height: 14px; background: var(--btn-bg); border-radius: 4px; overflow: hidden; }
+        .ndns-app-fill {
+            height: 100%; min-width: 3px; border-radius: 4px;
+            background: linear-gradient(90deg, var(--accent-secondary), var(--accent-color));
+        }
+        .ndns-app-count {
+            color: var(--panel-text-secondary); font-size: 10px; font-family: monospace;
+            min-width: 42px; text-align: right;
+        }
+        .ndns-app-domains {
+            grid-column: 1 / -1; color: var(--panel-text-secondary); font-size: 10px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8;
+        }
+        @media (max-width: 620px) {
+            .ndns-app-row { grid-template-columns: 1fr auto; }
+            .ndns-app-track { grid-column: 1 / -1; }
+        }
+
         /* Bar Chart */
         .ndns-bar-chart { display: flex; flex-direction: column; gap: 6px; }
         .ndns-bar-row {
@@ -1844,6 +1893,10 @@ function addGlobalStyle(css) {
         const div = document.createElement('div');
         div.textContent = str;
         return div.innerHTML;
+    }
+
+    function escapeAttr(str) {
+        return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function downloadFile(content, fileName, mimeType = 'text/plain') {
@@ -3649,6 +3702,20 @@ function addGlobalStyle(css) {
         { key: '90d', label: 'Last 90 Days', description: 'Weekly rollup', days: 90, bucketCount: 13 },
         { key: '1y', label: 'Last 1 Year', description: 'Monthly rollup', days: 365, bucketCount: 12 }
     ];
+    const DEVICE_DRILLDOWN_LIMIT = 5;
+    const DEVICE_APP_SIGNATURES = [
+        { name: 'Apple / iCloud', domains: ['apple.com', 'icloud.com', 'icloud-content.com', 'mzstatic.com', 'itunes.apple.com', 'aaplimg.com', 'apple-dns.net'] },
+        { name: 'Google / Android', domains: ['google.com', 'gstatic.com', 'googleapis.com', 'googleusercontent.com', 'googlevideo.com', 'youtube.com', 'ytimg.com', 'android.com', 'firebaseio.com', 'app-measurement.com'] },
+        { name: 'Microsoft / Windows', domains: ['microsoft.com', 'windows.com', 'windowsupdate.com', 'msftconnecttest.com', 'live.com', 'office.com', 'office365.com', 'outlook.com', 'teams.microsoft.com'] },
+        { name: 'Meta', domains: ['facebook.com', 'fbcdn.net', 'instagram.com', 'cdninstagram.com', 'whatsapp.net', 'whatsapp.com', 'messenger.com'] },
+        { name: 'Amazon', domains: ['amazon.com', 'amazonaws.com', 'cloudfront.net', 'media-amazon.com', 'alexa.com', 'amazonalexa.com'] },
+        { name: 'Streaming', domains: ['netflix.com', 'nflxvideo.net', 'hulu.com', 'disneyplus.com', 'spotify.com', 'roku.com', 'pandora.com', 'hbo.com', 'max.com'] },
+        { name: 'Gaming', domains: ['steampowered.com', 'steamcontent.com', 'epicgames.com', 'playstation.net', 'xboxlive.com', 'nintendo.net', 'battle.net'] },
+        { name: 'Messaging / Work', domains: ['slack.com', 'discord.com', 'zoom.us', 'telegram.org', 'signal.org', 'webex.com'] },
+        { name: 'Network / CDN', domains: ['nextdns.io', 'cloudflare.com', 'cloudflare-dns.com', 'akamaihd.net', 'akadns.net', 'fastly.net', 'fastly-edge.com'] },
+        { name: 'Smart Home / IoT', domains: ['tuyaus.com', 'tuya.com', 'ring.com', 'nest.com', 'samsungiotcloud.com', 'samsungcloudsolution.com', 'lgsmartad.com', 'tplinkcloud.com', 'meross.com', 'ecobee.com', 'ewelink.cc'] },
+        { name: 'Ads / Telemetry', domains: ['doubleclick.net', 'googlesyndication.com', 'sentry.io', 'crashlytics.com', 'amplitude.com', 'segment.io', 'scorecardresearch.com'] }
+    ];
 
     let analyticsCache = null;
     let analyticsWindowKey = '90d';
@@ -3731,6 +3798,71 @@ function addGlobalStyle(css) {
             blocked,
             blockedPct: total > 0 ? (blocked / total * 100) : 0
         };
+    }
+
+    function getAnalyticsItemValue(item) {
+        return Number(item?.queries || item?.count || item?.value || 0);
+    }
+
+    function getDomainFromAnalyticsItem(item) {
+        return String(item?.domain || item?.name || item?.id || '').toLowerCase();
+    }
+
+    function normalizeDeviceItem(item) {
+        const id = String(item?.id || item?.device || item?.name || 'unknown-device');
+        const name = String(item?.name || item?.deviceName || item?.id || 'Unknown Device');
+        const metaParts = [item?.model, item?.os, item?.localIp || item?.ip].filter(Boolean).map(String);
+        return {
+            id,
+            name,
+            meta: metaParts.join(' / '),
+            queries: getAnalyticsItemValue(item)
+        };
+    }
+
+    function domainMatchesSuffix(domain, suffix) {
+        return domain === suffix || domain.endsWith(`.${suffix}`);
+    }
+
+    function inferAppFromDomain(domain) {
+        if (!domain) return 'Unclassified';
+        const hit = DEVICE_APP_SIGNATURES.find(signature => signature.domains.some(suffix => domainMatchesSuffix(domain, suffix)));
+        return hit?.name || 'Unclassified';
+    }
+
+    function buildAppBreakdown(domainRows) {
+        const groups = new Map();
+        normalizeAnalyticsData(domainRows).forEach((item) => {
+            const domain = getDomainFromAnalyticsItem(item);
+            const queries = getAnalyticsItemValue(item);
+            if (!domain || queries <= 0) return;
+            const appName = inferAppFromDomain(domain);
+            if (!groups.has(appName)) groups.set(appName, { name: appName, queries: 0, domains: [] });
+            const group = groups.get(appName);
+            group.queries += queries;
+            if (group.domains.length < 4 && !group.domains.includes(domain)) group.domains.push(domain);
+        });
+        return Array.from(groups.values())
+            .sort((a, b) => b.queries - a.queries)
+            .slice(0, 6);
+    }
+
+    async function fetchDeviceDrilldowns(safeApi, devicesRaw, rangeParams) {
+        const devices = normalizeAnalyticsData(devicesRaw)
+            .map(normalizeDeviceItem)
+            .filter(device => device.id && device.queries > 0)
+            .sort((a, b) => b.queries - a.queries)
+            .slice(0, DEVICE_DRILLDOWN_LIMIT);
+
+        const drilldowns = [];
+        for (const device of devices) {
+            const domains = await safeApi('domains', { ...rangeParams, device: device.id, limit: 100 });
+            drilldowns.push({
+                ...device,
+                apps: buildAppBreakdown(domains)
+            });
+        }
+        return drilldowns;
     }
 
     function formatShortDate(date) {
@@ -3869,6 +4001,12 @@ function addGlobalStyle(css) {
             ]);
 
             console.log('[NDNS] Analytics data loaded successfully');
+            let deviceDrilldowns = [];
+            try {
+                deviceDrilldowns = await fetchDeviceDrilldowns(safeApi, devicesData, rangeParams);
+            } catch (err) {
+                console.warn('[NDNS] Device drill-down failed:', err?.message || err);
+            }
 
             analyticsCache = {
                 window: {
@@ -3881,7 +4019,8 @@ function addGlobalStyle(css) {
                 dnssec: normalizeAnalyticsData(dnssecData), encryption: normalizeAnalyticsData(encryptionData), protocols: normalizeAnalyticsData(protocolsData),
                 queryTypes: normalizeAnalyticsData(queryTypesData), ipVersions: normalizeAnalyticsData(ipVersionsData),
                 destinations: normalizeAnalyticsData(destinationsData), devices: normalizeAnalyticsData(devicesData),
-                statusSeries: statusSeries || []
+                statusSeries: statusSeries || [],
+                deviceDrilldowns
             };
 
             loading.remove();
@@ -3960,6 +4099,13 @@ function addGlobalStyle(css) {
         row3.appendChild(buildBarWidget('Resolver Destinations', data.destinations, 15, 'blue'));
         container.appendChild(row3);
 
+        if (data.deviceDrilldowns?.length) {
+            const deviceRow = document.createElement('div');
+            deviceRow.className = 'ndns-widget-grid';
+            deviceRow.appendChild(buildDeviceDrilldownWidget(data.deviceDrilldowns));
+            container.appendChild(deviceRow);
+        }
+
         // --- Row 4: DNSSEC + Encryption + Protocols (3-col) ---
         const row4 = document.createElement('div');
         row4.className = 'ndns-widget-grid three-col';
@@ -4033,7 +4179,7 @@ function addGlobalStyle(css) {
         const chart = document.createElement('div');
         chart.className = 'ndns-timeseries-chart';
         chart.innerHTML = `
-            <svg class="ndns-timeseries-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(windowMeta?.label || 'Historical')} query trend">
+            <svg class="ndns-timeseries-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeAttr(windowMeta?.label || 'Historical')} query trend">
                 ${gridLines}
                 ${bars}
                 <polyline class="ndns-timeseries-total" points="${linePoints}"></polyline>
@@ -4052,6 +4198,62 @@ function addGlobalStyle(css) {
             <div class="ndns-timeseries-chip"><span>Avg blocked</span><strong>${avgBlockedPct.toFixed(1)}%</strong></div>
         `;
         widget.appendChild(summary);
+        return widget;
+    }
+
+    function buildDeviceDrilldownWidget(devices) {
+        const widget = document.createElement('div');
+        widget.className = 'ndns-widget full-width';
+        const h4 = document.createElement('h4');
+        h4.textContent = 'Device App Drill-down';
+        widget.appendChild(h4);
+
+        const activeDevices = (devices || []).filter(device => device.apps?.length);
+        if (activeDevices.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'widget-empty';
+            empty.textContent = 'No per-device app data available';
+            widget.appendChild(empty);
+            return widget;
+        }
+
+        const grid = document.createElement('div');
+        grid.className = 'ndns-device-drilldown';
+        activeDevices.forEach((device) => {
+            const card = document.createElement('div');
+            card.className = 'ndns-device-card';
+
+            const header = document.createElement('div');
+            header.className = 'ndns-device-head';
+            header.innerHTML = `
+                <div>
+                    <div class="ndns-device-name" title="${escapeAttr(device.name)}">${escapeHtml(device.name)}</div>
+                    ${device.meta ? `<div class="ndns-device-meta" title="${escapeAttr(device.meta)}">${escapeHtml(device.meta)}</div>` : ''}
+                </div>
+                <div class="ndns-device-count">${device.queries.toLocaleString()}</div>
+            `;
+            card.appendChild(header);
+
+            const maxAppQueries = Math.max(...device.apps.map(app => app.queries), 1);
+            const appList = document.createElement('div');
+            appList.className = 'ndns-app-list';
+            device.apps.forEach((app) => {
+                const pct = Math.max(2, app.queries / maxAppQueries * 100);
+                const row = document.createElement('div');
+                row.className = 'ndns-app-row';
+                row.innerHTML = `
+                    <div class="ndns-app-name" title="${escapeAttr(app.name)}">${escapeHtml(app.name)}</div>
+                    <div class="ndns-app-track"><div class="ndns-app-fill" style="width:${pct.toFixed(1)}%"></div></div>
+                    <div class="ndns-app-count">${app.queries.toLocaleString()}</div>
+                    <div class="ndns-app-domains" title="${escapeAttr(app.domains.join(', '))}">${escapeHtml(app.domains.join(', '))}</div>
+                `;
+                appList.appendChild(row);
+            });
+            card.appendChild(appList);
+            grid.appendChild(card);
+        });
+
+        widget.appendChild(grid);
         return widget;
     }
 
@@ -4246,6 +4448,21 @@ function addGlobalStyle(css) {
         addSection('Protocols', analyticsCache.protocols);
         addSection('IP Versions', analyticsCache.ipVersions);
         addSection('Destinations', analyticsCache.destinations);
+        if (analyticsCache.deviceDrilldowns?.length) {
+            sections.push('\n# Device App Drill-down');
+            sections.push('Device,Device Queries,App Guess,App Queries,Top Domains');
+            analyticsCache.deviceDrilldowns.forEach((device) => {
+                device.apps.forEach((app) => {
+                    sections.push([
+                        csvEscape(device.name),
+                        device.queries,
+                        csvEscape(app.name),
+                        app.queries,
+                        csvEscape(app.domains.join(' | '))
+                    ].join(','));
+                });
+            });
+        }
         if (analyticsCache.statusSeries?.length) {
             sections.push('\n# Historical Rollup');
             sections.push('Period,From,To,Total Queries,Allowed,Blocked,Blocked Percent');
@@ -4547,7 +4764,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.3'
+                    source: 'NDNS v3.4.4'
                 })
             });
         } catch {}
@@ -5190,7 +5407,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.3';
+        footer.textContent = 'NDNS v3.4.4';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
