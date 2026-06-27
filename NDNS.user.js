@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.5
+// @version      3.4.6
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1450,6 +1450,32 @@ function addGlobalStyle(css) {
         @media (max-width: 620px) {
             .ndns-app-row { grid-template-columns: 1fr auto; }
             .ndns-app-track { grid-column: 1 / -1; }
+        }
+
+        /* Anomaly Alerts */
+        .ndns-anomaly-list { display: flex; flex-direction: column; gap: 8px; }
+        .ndns-anomaly-row {
+            display: grid; grid-template-columns: minmax(120px, 1fr) auto auto auto;
+            gap: 10px; align-items: center; padding: 10px;
+            background: rgba(229, 49, 112, 0.08); border: 1px solid rgba(229, 49, 112, 0.18);
+            border-radius: 8px;
+        }
+        .ndns-anomaly-name {
+            color: var(--panel-text); font-size: 12px; font-weight: 700;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .ndns-anomaly-stat {
+            color: var(--panel-text-secondary); font-size: 11px; font-family: monospace;
+            white-space: nowrap; text-align: right;
+        }
+        .ndns-anomaly-badge {
+            color: #fff; background: var(--danger-color); border-radius: 999px;
+            padding: 3px 7px; font-size: 10px; font-weight: 800; font-family: monospace;
+            white-space: nowrap;
+        }
+        @media (max-width: 620px) {
+            .ndns-anomaly-row { grid-template-columns: 1fr 1fr; }
+            .ndns-anomaly-badge { justify-self: start; }
         }
 
         /* Bar Chart */
@@ -3703,6 +3729,9 @@ function addGlobalStyle(css) {
         { key: '1y', label: 'Last 1 Year', description: 'Monthly rollup', days: 365, bucketCount: 12 }
     ];
     const DEVICE_DRILLDOWN_LIMIT = 5;
+    const ANALYTICS_SPIKE_RATIO = 1.75;
+    const ANALYTICS_SPIKE_MIN_QUERIES = 25;
+    const ANALYTICS_CATEGORY_ENDPOINTS = ['categories', 'reasons'];
     const DEVICE_APP_SIGNATURES = [
         { name: 'Apple / iCloud', domains: ['apple.com', 'icloud.com', 'icloud-content.com', 'mzstatic.com', 'itunes.apple.com', 'aaplimg.com', 'apple-dns.net'] },
         { name: 'Google / Android', domains: ['google.com', 'gstatic.com', 'googleapis.com', 'googleusercontent.com', 'googlevideo.com', 'youtube.com', 'ytimg.com', 'android.com', 'firebaseio.com', 'app-measurement.com'] },
@@ -3719,6 +3748,7 @@ function addGlobalStyle(css) {
 
     let analyticsCache = null;
     let analyticsWindowKey = '90d';
+    let lastAnomalyNotificationKey = '';
 
     async function initAnalyticsEnhancements() {
         if (!NDNS_API_KEY) return;
@@ -3863,6 +3893,69 @@ function addGlobalStyle(css) {
             });
         }
         return drilldowns;
+    }
+
+    function buildAnalyticsComparisonRanges(config) {
+        if (!config?.days) return null;
+        const to = new Date();
+        const from = new Date(to.getTime() - (config.days * ANALYTICS_DAY_MS));
+        const mid = new Date(from.getTime() + ((to.getTime() - from.getTime()) / 2));
+        return {
+            previous: { from: from.toISOString(), to: mid.toISOString() },
+            current: { from: mid.toISOString(), to: to.toISOString() }
+        };
+    }
+
+    async function fetchBlockedCategoryBreakdown(safeApi, params, preferredEndpoint = null) {
+        const endpoints = preferredEndpoint ? [preferredEndpoint] : ANALYTICS_CATEGORY_ENDPOINTS;
+        for (const endpoint of endpoints) {
+            const raw = await safeApi(endpoint, { ...params, status: 'blocked' });
+            const items = resolveItems(normalizeAnalyticsData(raw)).filter(item => item.value > 0);
+            if (items.length > 0) return { endpoint, items };
+        }
+        return { endpoint: preferredEndpoint || ANALYTICS_CATEGORY_ENDPOINTS[0], items: [] };
+    }
+
+    async function fetchBlockedCategorySpikes(safeApi, config) {
+        const ranges = buildAnalyticsComparisonRanges(config);
+        if (!ranges) return [];
+        const current = await fetchBlockedCategoryBreakdown(safeApi, ranges.current);
+        if (current.items.length === 0) return [];
+        const previous = await fetchBlockedCategoryBreakdown(safeApi, ranges.previous, current.endpoint);
+        const previousMap = new Map(previous.items.map(item => [item.name.toLowerCase(), item.value]));
+        return current.items.map((item) => {
+            const previousValue = previousMap.get(item.name.toLowerCase()) || 0;
+            const ratio = previousValue > 0 ? item.value / previousValue : Infinity;
+            const changePct = previousValue > 0 ? ((item.value - previousValue) / previousValue * 100) : 100;
+            return {
+                category: item.name,
+                current: item.value,
+                previous: previousValue,
+                ratio,
+                changePct,
+                endpoint: current.endpoint
+            };
+        })
+            .filter(item => item.current >= ANALYTICS_SPIKE_MIN_QUERIES && item.ratio >= ANALYTICS_SPIKE_RATIO)
+            .sort((a, b) => b.changePct - a.changePct)
+            .slice(0, 8);
+    }
+
+    function notifyBlockedCategorySpikes(pid, windowKey, spikes) {
+        if (!spikes?.length) return;
+        const signature = `${pid}:${windowKey}:${spikes.map(spike => `${spike.category}:${spike.current}:${spike.previous}`).join('|')}`;
+        if (signature === lastAnomalyNotificationKey) return;
+        lastAnomalyNotificationKey = signature;
+        const top = spikes[0];
+        const body = `${top.category}: ${top.current.toLocaleString()} blocked queries vs ${top.previous.toLocaleString()} previous.`;
+        showToast(`Blocked-query spike: ${top.category}`, true, 6000);
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            try {
+                new Notification('NDNS blocked-query spike', { body });
+            } catch (err) {
+                console.warn('[NDNS] Desktop notification failed:', err?.message || err);
+            }
+        }
     }
 
     function formatShortDate(date) {
@@ -4012,6 +4105,13 @@ function addGlobalStyle(css) {
             } catch (err) {
                 console.warn('[NDNS] Device drill-down failed:', err?.message || err);
             }
+            let categorySpikes = [];
+            try {
+                categorySpikes = await fetchBlockedCategorySpikes(safeApi, windowConfig);
+                notifyBlockedCategorySpikes(pid, windowConfig.key, categorySpikes);
+            } catch (err) {
+                console.warn('[NDNS] Category anomaly detection failed:', err?.message || err);
+            }
 
             analyticsCache = {
                 window: {
@@ -4025,7 +4125,8 @@ function addGlobalStyle(css) {
                 queryTypes: normalizeAnalyticsData(queryTypesData), ipVersions: normalizeAnalyticsData(ipVersionsData),
                 destinations: normalizeAnalyticsData(destinationsData), devices: normalizeAnalyticsData(devicesData),
                 statusSeries: statusSeries || [],
-                deviceDrilldowns
+                deviceDrilldowns,
+                categorySpikes
             };
 
             loading.remove();
@@ -4039,7 +4140,7 @@ function addGlobalStyle(css) {
     function resolveItems(data) {
         if (!data) return [];
         if (Array.isArray(data)) return data.map(d => {
-            let name = d?.name || d?.domain || d?.id || d?.status || d?.protocol || d?.type || 'Unknown';
+            let name = d?.name || d?.category || d?.reason || d?.domain || d?.id || d?.status || d?.protocol || d?.type || 'Unknown';
             if (d?.validated !== undefined && !d?.name && !d?.domain) name = d.validated ? 'Validated' : 'Not Validated';
             if (d?.encrypted !== undefined && !d?.name && !d?.domain) name = d.encrypted ? 'Encrypted' : 'Unencrypted';
             return { name: String(name), value: d?.queries || d?.count || 0 };
@@ -4081,6 +4182,13 @@ function addGlobalStyle(css) {
             trendRow.className = 'ndns-widget-grid';
             trendRow.appendChild(buildTimeSeriesWidget(data.statusSeries, data.window));
             container.appendChild(trendRow);
+        }
+
+        if (data.window?.range?.from) {
+            const anomalyRow = document.createElement('div');
+            anomalyRow.className = 'ndns-widget-grid';
+            anomalyRow.appendChild(buildAnomalyWidget(data.categorySpikes || []));
+            container.appendChild(anomalyRow);
         }
 
         // --- Row 1: Status Breakdown Ring + Query Types Ring ---
@@ -4128,6 +4236,40 @@ function addGlobalStyle(css) {
     }
 
     // --- Widget Builders ---
+    function buildAnomalyWidget(spikes) {
+        const widget = document.createElement('div');
+        widget.className = 'ndns-widget full-width';
+        const h4 = document.createElement('h4');
+        h4.textContent = 'Blocked Category Spikes';
+        widget.appendChild(h4);
+
+        if (!spikes || spikes.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'widget-empty';
+            empty.textContent = 'No blocked category spikes detected';
+            widget.appendChild(empty);
+            return widget;
+        }
+
+        const list = document.createElement('div');
+        list.className = 'ndns-anomaly-list';
+        spikes.forEach((spike) => {
+            const row = document.createElement('div');
+            row.className = 'ndns-anomaly-row';
+            const previousLabel = spike.previous > 0 ? spike.previous.toLocaleString() : '0';
+            const ratioLabel = Number.isFinite(spike.ratio) ? `${spike.ratio.toFixed(1)}x` : 'new';
+            row.innerHTML = `
+                <div class="ndns-anomaly-name" title="${escapeAttr(spike.category)}">${escapeHtml(spike.category)}</div>
+                <div class="ndns-anomaly-stat">now ${spike.current.toLocaleString()}</div>
+                <div class="ndns-anomaly-stat">prev ${previousLabel}</div>
+                <div class="ndns-anomaly-badge">${ratioLabel}</div>
+            `;
+            list.appendChild(row);
+        });
+        widget.appendChild(list);
+        return widget;
+    }
+
     function buildTimeSeriesWidget(series, windowMeta) {
         const widget = document.createElement('div');
         widget.className = 'ndns-widget full-width';
@@ -4468,6 +4610,20 @@ function addGlobalStyle(css) {
                 });
             });
         }
+        if (analyticsCache.categorySpikes?.length) {
+            sections.push('\n# Blocked Category Spikes');
+            sections.push('Category,Current,Previous,Ratio,Change Percent,Endpoint');
+            analyticsCache.categorySpikes.forEach((spike) => {
+                sections.push([
+                    csvEscape(spike.category),
+                    spike.current,
+                    spike.previous,
+                    Number.isFinite(spike.ratio) ? spike.ratio.toFixed(2) : 'new',
+                    spike.changePct.toFixed(1),
+                    csvEscape(spike.endpoint)
+                ].join(','));
+            });
+        }
         if (analyticsCache.statusSeries?.length) {
             sections.push('\n# Historical Rollup');
             sections.push('Period,From,To,Total Queries,Allowed,Blocked,Blocked Percent');
@@ -4543,6 +4699,16 @@ function addGlobalStyle(css) {
         ]);
     }
 
+    function buildAnomalyReportRows(spikes) {
+        return (spikes || []).map(spike => [
+            spike.category,
+            spike.current.toLocaleString(),
+            spike.previous.toLocaleString(),
+            Number.isFinite(spike.ratio) ? `${spike.ratio.toFixed(1)}x` : 'new',
+            `${spike.changePct.toFixed(1)}%`
+        ]);
+    }
+
     function buildAnalyticsReportHTML(pid) {
         const statusItems = resolveItems(analyticsCache.status);
         const summary = summarizeStatusItems(statusItems);
@@ -4554,6 +4720,7 @@ function addGlobalStyle(css) {
         const deviceRows = buildMetricRows(analyticsCache.devices, 20);
         const deviceAppRows = buildDeviceReportRows(analyticsCache.deviceDrilldowns);
         const rollupRows = buildRollupReportRows(analyticsCache.statusSeries);
+        const anomalyRows = buildAnomalyReportRows(analyticsCache.categorySpikes);
 
         return `<!doctype html>
 <html>
@@ -4613,6 +4780,7 @@ function addGlobalStyle(css) {
         <div class="card"><span class="label">Blocked Rate</span><strong>${summary.blockedPct.toFixed(1)}%</strong></div>
     </section>
     ${buildReportTable('Historical Rollup', ['Period', 'Total', 'Allowed', 'Blocked', 'Blocked %'], rollupRows)}
+    ${buildReportTable('Blocked Category Spikes', ['Category', 'Current', 'Previous', 'Ratio', 'Change %'], anomalyRows)}
     ${buildReportTable('Top Queried Domains', ['Domain', 'Queries', 'Share'], topDomainRows)}
     ${buildReportTable('Top Blocked Domains', ['Domain', 'Queries', 'Share'], blockedRows)}
     ${buildReportTable('Devices', ['Device', 'Queries', 'Share'], deviceRows)}
@@ -4921,7 +5089,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.5'
+                    source: 'NDNS v3.4.6'
                 })
             });
         } catch {}
@@ -5564,7 +5732,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.5';
+        footer.textContent = 'NDNS v3.4.6';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
