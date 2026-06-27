@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.4
+// @version      3.4.5
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -3954,6 +3954,11 @@ function addGlobalStyle(css) {
         jsonBtn.onclick = () => exportAnalyticsJSON(pid);
         controls.appendChild(jsonBtn);
 
+        const pdfBtn = document.createElement('button');
+        pdfBtn.textContent = 'Export PDF';
+        pdfBtn.onclick = () => exportAnalyticsPDF(pid);
+        controls.appendChild(pdfBtn);
+
         header.appendChild(controls);
         return header;
     }
@@ -4489,6 +4494,158 @@ function addGlobalStyle(css) {
         showToast('Full analytics exported as JSON.');
     }
 
+    function buildReportTable(title, headers, rows) {
+        if (!rows || rows.length === 0) return '';
+        return `
+            <section class="report-section">
+                <h2>${escapeHtml(title)}</h2>
+                <table>
+                    <thead><tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
+                    <tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>
+                </table>
+            </section>
+        `;
+    }
+
+    function buildMetricRows(items, limit = 20) {
+        const resolved = resolveItems(items).slice(0, limit);
+        const total = resolved.reduce((s, item) => s + item.value, 0);
+        return resolved.map(item => [
+            item.name,
+            item.value.toLocaleString(),
+            total > 0 ? `${(item.value / total * 100).toFixed(1)}%` : '0.0%'
+        ]);
+    }
+
+    function buildDeviceReportRows(devices) {
+        const rows = [];
+        (devices || []).forEach((device) => {
+            (device.apps || []).forEach((app) => {
+                rows.push([
+                    device.name,
+                    device.queries.toLocaleString(),
+                    app.name,
+                    app.queries.toLocaleString(),
+                    app.domains.join(', ')
+                ]);
+            });
+        });
+        return rows;
+    }
+
+    function buildRollupReportRows(series) {
+        return (series || []).map(point => [
+            point.label,
+            point.total.toLocaleString(),
+            point.allowed.toLocaleString(),
+            point.blocked.toLocaleString(),
+            `${point.blockedPct.toFixed(1)}%`
+        ]);
+    }
+
+    function buildAnalyticsReportHTML(pid) {
+        const statusItems = resolveItems(analyticsCache.status);
+        const summary = summarizeStatusItems(statusItems);
+        const generatedAt = new Date().toLocaleString();
+        const windowLabel = analyticsCache.window?.label || 'API Default';
+        const windowDescription = analyticsCache.window?.description || 'Native NextDNS window';
+        const topDomainRows = buildMetricRows(analyticsCache.domains, 20);
+        const blockedRows = buildMetricRows(analyticsCache.blocked, 20);
+        const deviceRows = buildMetricRows(analyticsCache.devices, 20);
+        const deviceAppRows = buildDeviceReportRows(analyticsCache.deviceDrilldowns);
+        const rollupRows = buildRollupReportRows(analyticsCache.statusSeries);
+
+        return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NDNS Analytics Report - ${escapeHtml(pid)}</title>
+<style>
+    :root { color-scheme: light; --accent:#6246ea; --green:#1f9d5c; --red:#c2255c; --ink:#14161f; --muted:#5b6272; --line:#d8dce6; --bg:#f6f7fb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; font-family: Arial, Helvetica, sans-serif; color: var(--ink); background: var(--bg); }
+    .report { max-width: 1040px; margin: 0 auto; background: #fff; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    header { padding: 28px 32px; color: #fff; background: linear-gradient(135deg, #16161a, var(--accent)); }
+    .brand { font-size: 13px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; opacity: 0.86; }
+    h1 { margin: 8px 0 6px; font-size: 30px; line-height: 1.1; }
+    .subtitle { margin: 0; font-size: 13px; opacity: 0.9; }
+    .meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 18px 32px; border-bottom: 1px solid var(--line); background: #fbfcff; }
+    .meta div, .card { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; }
+    .value { font-size: 15px; font-weight: 700; }
+    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; padding: 22px 32px 6px; }
+    .card strong { display: block; font-size: 22px; }
+    .card.total strong { color: var(--accent); }
+    .card.allowed strong { color: var(--green); }
+    .card.blocked strong { color: var(--red); }
+    .report-section { padding: 20px 32px; break-inside: avoid; }
+    h2 { margin: 0 0 10px; font-size: 17px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; padding: 8px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid var(--line); }
+    td { padding: 8px; border-bottom: 1px solid #edf0f5; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafbfe; }
+    footer { padding: 18px 32px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+    @media print {
+        body { padding: 0; background: #fff; }
+        .report { border: 0; border-radius: 0; }
+        header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .meta, .cards { grid-template-columns: repeat(2, 1fr); }
+    }
+</style>
+</head>
+<body>
+<main class="report">
+    <header>
+        <div class="brand">NDNS / NextDNS</div>
+        <h1>Analytics Report</h1>
+        <p class="subtitle">Prepared from the loaded NDNS analytics dashboard.</p>
+    </header>
+    <section class="meta">
+        <div><span class="label">Profile</span><span class="value">${escapeHtml(pid)}</span></div>
+        <div><span class="label">Range</span><span class="value">${escapeHtml(windowLabel)}</span></div>
+        <div><span class="label">Rollup</span><span class="value">${escapeHtml(windowDescription)}</span></div>
+        <div><span class="label">Generated</span><span class="value">${escapeHtml(generatedAt)}</span></div>
+    </section>
+    <section class="cards">
+        <div class="card total"><span class="label">Total Queries</span><strong>${summary.total.toLocaleString()}</strong></div>
+        <div class="card allowed"><span class="label">Allowed</span><strong>${summary.allowed.toLocaleString()}</strong></div>
+        <div class="card blocked"><span class="label">Blocked</span><strong>${summary.blocked.toLocaleString()}</strong></div>
+        <div class="card"><span class="label">Blocked Rate</span><strong>${summary.blockedPct.toFixed(1)}%</strong></div>
+    </section>
+    ${buildReportTable('Historical Rollup', ['Period', 'Total', 'Allowed', 'Blocked', 'Blocked %'], rollupRows)}
+    ${buildReportTable('Top Queried Domains', ['Domain', 'Queries', 'Share'], topDomainRows)}
+    ${buildReportTable('Top Blocked Domains', ['Domain', 'Queries', 'Share'], blockedRows)}
+    ${buildReportTable('Devices', ['Device', 'Queries', 'Share'], deviceRows)}
+    ${buildReportTable('Device App Drill-down', ['Device', 'Device Queries', 'App Guess', 'App Queries', 'Top Domains'], deviceAppRows)}
+    ${buildReportTable('Query Status', ['Status', 'Queries', 'Share'], buildMetricRows(analyticsCache.status, 20))}
+    ${buildReportTable('Query Types', ['Type', 'Queries', 'Share'], buildMetricRows(analyticsCache.queryTypes, 20))}
+    ${buildReportTable('DNSSEC', ['State', 'Queries', 'Share'], buildMetricRows(analyticsCache.dnssec, 20))}
+    ${buildReportTable('Encryption', ['State', 'Queries', 'Share'], buildMetricRows(analyticsCache.encryption, 20))}
+    ${buildReportTable('Protocols', ['Protocol', 'Queries', 'Share'], buildMetricRows(analyticsCache.protocols, 20))}
+    ${buildReportTable('IP Versions', ['Version', 'Queries', 'Share'], buildMetricRows(analyticsCache.ipVersions, 20))}
+    ${buildReportTable('Destinations', ['Destination', 'Queries', 'Share'], buildMetricRows(analyticsCache.destinations, 20))}
+    <footer>NDNS report generated locally in the browser. API key and analytics data were not sent to a third-party reporting service.</footer>
+</main>
+<script>
+    window.addEventListener('load', () => setTimeout(() => { window.focus(); window.print(); }, 350));
+<\/script>
+</body>
+</html>`;
+    }
+
+    function exportAnalyticsPDF(pid) {
+        if (!analyticsCache) { showToast('No analytics data loaded.', true); return; }
+        const reportWindow = window.open('', '_blank');
+        if (!reportWindow) {
+            showToast('Popup blocked. Allow popups to export the PDF report.', true);
+            return;
+        }
+        reportWindow.document.open();
+        reportWindow.document.write(buildAnalyticsReportHTML(pid));
+        reportWindow.document.close();
+        showToast('PDF report opened. Choose Save as PDF in the print dialog.');
+    }
+
     // --- SCHEDULED LOG DOWNLOADS ---
     function initScheduledLogs() {
         if (!scheduledLogsConfig.enabled) return;
@@ -4764,7 +4921,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.4'
+                    source: 'NDNS v3.4.5'
                 })
             });
         } catch {}
@@ -5407,7 +5564,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.4';
+        footer.textContent = 'NDNS v3.4.5';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
