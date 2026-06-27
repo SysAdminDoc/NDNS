@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.7
+// @version      3.4.8
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2529,17 +2529,132 @@ function addGlobalStyle(css) {
         const endpoint = mode === 'deny' ? 'denylist' : 'allowlist';
         const apiUrl = `/profiles/${pid}/${endpoint}`;
         try {
-            await makeApiRequest('POST', apiUrl, { "id": domainToSend, "active": true }, NDNS_API_KEY);
-            hiddenDomains.add(domain);
-            await storage.set({ [KEY_HIDDEN_DOMAINS]: [...hiddenDomains] });
-            const level = domain === extractRootDomain(domain) ? 'root' : 'sub';
-            await updateDomainAction(domain, mode, level);
+            await addDomainToList(domainToSend, mode, pid);
             showToast(`${domain} added to ${endpoint} and hidden!`);
             invalidateLogCache();
             cleanLogs();
         } catch (error) {
             showToast(`API Error: ${error.message || 'Unknown'}`, true);
         }
+    }
+
+    function normalizeImportedDomain(raw) {
+        let domain = String(raw || '').trim().toLowerCase();
+        if (!domain || domain.startsWith('#')) return '';
+        domain = domain.replace(/^\*\./, '');
+        domain = domain.replace(/^https?:\/\//, '');
+        domain = domain.split('/')[0].split('?')[0].split('#')[0].replace(/:\d+$/, '');
+        return domain.replace(/^\.+|\.+$/g, '');
+    }
+
+    function parseImportedDomains(text) {
+        const seen = new Set();
+        return String(text || '').split(/\r?\n/)
+            .map(normalizeImportedDomain)
+            .filter(domain => /^[a-z0-9][a-z0-9.-]*\.[a-z0-9-]{2,}$/i.test(domain))
+            .filter((domain) => {
+                if (seen.has(domain)) return false;
+                seen.add(domain);
+                return true;
+            });
+    }
+
+    async function addDomainToList(domain, mode = 'deny', profileId = getCurrentProfileId()) {
+        if (!NDNS_API_KEY) throw new Error('API Key not set.');
+        if (!profileId) throw new Error('Could not find Profile ID.');
+        const domainToSend = normalizeImportedDomain(domain);
+        if (!domainToSend) throw new Error('Domain is empty.');
+        const endpoint = mode === 'deny' ? 'denylist' : 'allowlist';
+        await makeApiRequest('POST', `/profiles/${profileId}/${endpoint}`, { id: domainToSend, active: true }, NDNS_API_KEY);
+        hiddenDomains.add(domainToSend);
+        await storage.set({ [KEY_HIDDEN_DOMAINS]: [...hiddenDomains] });
+        const level = domainToSend === extractRootDomain(domainToSend) ? 'root' : 'sub';
+        await updateDomainAction(domainToSend, mode, level);
+        return domainToSend;
+    }
+
+    function showBulkDomainImport() {
+        if (!NDNS_API_KEY) return showToast('API Key not set.', true);
+        const pid = getCurrentProfileId();
+        if (!pid) return showToast('Could not find Profile ID.', true);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.onclick = (e) => e.stopPropagation();
+        modal.innerHTML = '<h3>Bulk Import Domains</h3><p style="font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;">Paste one domain per line and choose the target list.</p>';
+
+        const listSelect = document.createElement('select');
+        listSelect.className = 'ndns-input';
+        listSelect.innerHTML = '<option value="deny">Denylist</option><option value="allow">Allowlist</option>';
+
+        const textarea = document.createElement('textarea');
+        textarea.className = 'ndns-input';
+        textarea.placeholder = 'ads.example.com\ntracker.example.net\nallowed.example.org';
+        textarea.style.cssText = 'min-height:160px;resize:vertical;margin-top:8px;font-family:monospace;';
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size: 12px; color: var(--panel-text-secondary); margin-top: 8px;';
+        statusEl.textContent = 'Idle';
+
+        const buttonRow = document.createElement('div');
+        buttonRow.style.cssText = 'display:flex;gap:8px;margin-top:12px;';
+
+        const importBtn = document.createElement('button');
+        importBtn.className = 'ndns-panel-button';
+        importBtn.textContent = 'Import';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'ndns-panel-button danger';
+        cancelBtn.textContent = 'Close';
+        cancelBtn.onclick = () => overlay.remove();
+
+        importBtn.onclick = async () => {
+            const mode = listSelect.value;
+            const domains = parseImportedDomains(textarea.value);
+            if (domains.length === 0) {
+                statusEl.textContent = 'No valid domains found.';
+                showToast('No valid domains found.', true);
+                return;
+            }
+
+            importBtn.disabled = true;
+            listSelect.disabled = true;
+            textarea.disabled = true;
+            let added = 0;
+            const failures = [];
+
+            for (let i = 0; i < domains.length; i++) {
+                const domain = domains[i];
+                statusEl.textContent = `Importing ${i + 1}/${domains.length}: ${domain}`;
+                try {
+                    await addDomainToList(domain, mode, pid);
+                    added++;
+                } catch (error) {
+                    failures.push(`${domain}: ${error.message || 'Unknown error'}`);
+                }
+                await sleep(120);
+            }
+
+            invalidateLogCache();
+            cleanLogs();
+            statusEl.textContent = failures.length
+                ? `Imported ${added}/${domains.length}. Failed: ${failures.slice(0, 3).join('; ')}`
+                : `Imported ${added}/${domains.length}.`;
+            showToast(`Imported ${added} domains to ${mode === 'deny' ? 'denylist' : 'allowlist'}${failures.length ? ` (${failures.length} failed)` : ''}.`, failures.length > 0);
+            importBtn.disabled = false;
+            listSelect.disabled = false;
+            textarea.disabled = false;
+        };
+
+        buttonRow.append(importBtn, cancelBtn);
+        modal.append(listSelect, textarea, statusEl, buttonRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        textarea.focus();
     }
 
     async function removeDomainViaApi(domain, listType) {
@@ -5276,7 +5391,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.7'
+                    source: 'NDNS v3.4.8'
                 })
             });
         } catch {}
@@ -5552,6 +5667,11 @@ function addGlobalStyle(css) {
             importBtn.parentElement.insertBefore(importArea, importBtn.nextSibling);
         };
 
+        const bulkImportBtn = document.createElement('button');
+        bulkImportBtn.textContent = 'Bulk Import Domains';
+        bulkImportBtn.className = 'ndns-panel-button';
+        bulkImportBtn.onclick = showBulkDomainImport;
+
         const exportListBtn = document.createElement('button');
         exportListBtn.textContent = 'Export Hidden List';
         exportListBtn.className = 'ndns-panel-button';
@@ -5568,7 +5688,7 @@ function addGlobalStyle(css) {
             }
         };
 
-        dataControls.append(exportHostsBtn, exportProfileBtn, importBtn, exportListBtn, clearBtn);
+        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, importBtn, exportListBtn, clearBtn);
         dataSection.appendChild(dataControls);
         modalBody.appendChild(dataSection);
 
@@ -5919,7 +6039,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.7';
+        footer.textContent = 'NDNS v3.4.8';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
