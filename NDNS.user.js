@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.6
+// @version      3.4.7
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -3728,6 +3728,10 @@ function addGlobalStyle(css) {
         { key: '90d', label: 'Last 90 Days', description: 'Weekly rollup', days: 90, bucketCount: 13 },
         { key: '1y', label: 'Last 1 Year', description: 'Monthly rollup', days: 365, bucketCount: 12 }
     ];
+    const ANALYTICS_SCOPES = [
+        { key: 'current', label: 'Current Profile' },
+        { key: 'all', label: 'All Profiles' }
+    ];
     const DEVICE_DRILLDOWN_LIMIT = 5;
     const ANALYTICS_SPIKE_RATIO = 1.75;
     const ANALYTICS_SPIKE_MIN_QUERIES = 25;
@@ -3748,6 +3752,7 @@ function addGlobalStyle(css) {
 
     let analyticsCache = null;
     let analyticsWindowKey = '90d';
+    let analyticsScopeKey = 'current';
     let lastAnomalyNotificationKey = '';
 
     async function initAnalyticsEnhancements() {
@@ -3958,6 +3963,140 @@ function addGlobalStyle(css) {
         }
     }
 
+    function buildAnalyticsSafeApi(profileId) {
+        return (endpoint, params = {}) => {
+            const apiEndpoint = buildAnalyticsEndpoint(endpoint, params);
+            return makeApiRequest('GET', `/profiles/${profileId}/analytics/${apiEndpoint}`, null, NDNS_API_KEY).catch((err) => {
+                console.warn(`[NDNS] Analytics API failed for ${profileId}/${apiEndpoint}:`, err?.message || err);
+                return null;
+            });
+        };
+    }
+
+    async function loadAnalyticsProfiles(currentPid) {
+        if (analyticsScopeKey !== 'all') return [{ id: currentPid, name: 'Current Profile' }];
+        const profiles = await makeApiRequest('GET', '/profiles', null, NDNS_API_KEY).catch((err) => {
+            console.warn('[NDNS] Profile list failed:', err?.message || err);
+            return null;
+        });
+        const profileList = (profiles?.data || profiles || [])
+            .filter(profile => profile?.id)
+            .map(profile => ({ id: String(profile.id), name: String(profile.name || profile.id) }));
+        if (profileList.length === 0) return [{ id: currentPid, name: 'Current Profile' }];
+        return profileList;
+    }
+
+    async function fetchAnalyticsPayload(profile, windowConfig, rangeParams) {
+        const safeApi = buildAnalyticsSafeApi(profile.id);
+        const withRange = (params = {}) => ({ ...rangeParams, ...params });
+        const seriesPromise = windowConfig.bucketCount ? fetchAnalyticsStatusSeries(safeApi, windowConfig).catch((err) => {
+            console.warn(`[NDNS] Analytics rollup failed for ${profile.id}:`, err?.message || err);
+            return null;
+        }) : Promise.resolve([]);
+
+        const [domains, blockedDomains, statusData, dnssecData, encryptionData, protocolsData, queryTypesData, ipVersionsData, destinationsData, devicesData, statusSeries] = await Promise.all([
+            safeApi('domains', withRange({ limit: 50 })),
+            safeApi('domains', withRange({ status: 'blocked', limit: 30 })),
+            safeApi('status', rangeParams),
+            safeApi('dnssec', rangeParams),
+            safeApi('encryption', rangeParams),
+            safeApi('protocols', rangeParams),
+            safeApi('queryTypes', rangeParams),
+            safeApi('ipVersions', rangeParams),
+            safeApi('destinations', rangeParams),
+            safeApi('devices', rangeParams),
+            seriesPromise
+        ]);
+
+        return {
+            profile,
+            safeApi,
+            domains: filterAnalyticsDomains(normalizeAnalyticsData(domains)),
+            blocked: filterAnalyticsDomains(normalizeAnalyticsData(blockedDomains)),
+            status: normalizeAnalyticsData(statusData),
+            dnssec: normalizeAnalyticsData(dnssecData),
+            encryption: normalizeAnalyticsData(encryptionData),
+            protocols: normalizeAnalyticsData(protocolsData),
+            queryTypes: normalizeAnalyticsData(queryTypesData),
+            ipVersions: normalizeAnalyticsData(ipVersionsData),
+            destinations: normalizeAnalyticsData(destinationsData),
+            devices: normalizeAnalyticsData(devicesData),
+            statusSeries: statusSeries || []
+        };
+    }
+
+    function mergeAnalyticsField(payloads, field) {
+        const merged = new Map();
+        payloads.forEach((payload) => {
+            resolveItems(payload[field]).forEach((item) => {
+                const key = item.name.toLowerCase();
+                if (!merged.has(key)) merged.set(key, { name: item.name, queries: 0 });
+                merged.get(key).queries += item.value;
+            });
+        });
+        return Array.from(merged.values()).sort((a, b) => b.queries - a.queries);
+    }
+
+    function mergeAnalyticsSeries(payloads) {
+        const merged = new Map();
+        payloads.forEach((payload) => {
+            (payload.statusSeries || []).forEach((point) => {
+                const key = `${point.from}|${point.to}|${point.label}`;
+                if (!merged.has(key)) merged.set(key, { label: point.label, from: point.from, to: point.to, total: 0, allowed: 0, blocked: 0, blockedPct: 0 });
+                const target = merged.get(key);
+                target.total += point.total;
+                target.allowed += point.allowed;
+                target.blocked += point.blocked;
+            });
+        });
+        return Array.from(merged.values()).map((point) => ({
+            ...point,
+            blockedPct: point.total > 0 ? (point.blocked / point.total * 100) : 0
+        })).sort((a, b) => new Date(a.from) - new Date(b.from));
+    }
+
+    function buildProfileSummaries(payloads) {
+        return payloads.map((payload) => {
+            const summary = summarizeStatusItems(resolveItems(payload.status));
+            return {
+                id: payload.profile.id,
+                name: payload.profile.name,
+                ...summary
+            };
+        }).sort((a, b) => b.total - a.total);
+    }
+
+    function mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, scopeKey) {
+        const profileSummaries = buildProfileSummaries(payloads);
+        return {
+            window: {
+                key: windowConfig.key,
+                label: windowConfig.label,
+                description: windowConfig.description,
+                range: rangeParams
+            },
+            scope: {
+                key: scopeKey,
+                label: scopeKey === 'all' ? 'All Profiles' : 'Current Profile',
+                profileCount: payloads.length
+            },
+            profileSummaries,
+            domains: mergeAnalyticsField(payloads, 'domains'),
+            blocked: mergeAnalyticsField(payloads, 'blocked'),
+            status: mergeAnalyticsField(payloads, 'status'),
+            dnssec: mergeAnalyticsField(payloads, 'dnssec'),
+            encryption: mergeAnalyticsField(payloads, 'encryption'),
+            protocols: mergeAnalyticsField(payloads, 'protocols'),
+            queryTypes: mergeAnalyticsField(payloads, 'queryTypes'),
+            ipVersions: mergeAnalyticsField(payloads, 'ipVersions'),
+            destinations: mergeAnalyticsField(payloads, 'destinations'),
+            devices: mergeAnalyticsField(payloads, 'devices'),
+            statusSeries: mergeAnalyticsSeries(payloads),
+            deviceDrilldowns: [],
+            categorySpikes: []
+        };
+    }
+
     function formatShortDate(date) {
         return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     }
@@ -4028,6 +4167,23 @@ function addGlobalStyle(css) {
         };
         controls.appendChild(rangeSelect);
 
+        const scopeSelect = document.createElement('select');
+        scopeSelect.setAttribute('aria-label', 'Analytics profile scope');
+        ANALYTICS_SCOPES.forEach((scopeConfig) => {
+            const option = document.createElement('option');
+            option.value = scopeConfig.key;
+            option.textContent = scopeConfig.label;
+            option.selected = scopeConfig.key === analyticsScopeKey;
+            scopeSelect.appendChild(option);
+        });
+        scopeSelect.onchange = () => {
+            analyticsScopeKey = scopeSelect.value;
+            analyticsCache = null;
+            container.innerHTML = '';
+            renderAnalyticsDashboard(pid, container);
+        };
+        controls.appendChild(scopeSelect);
+
         const refreshBtn = document.createElement('button');
         refreshBtn.textContent = 'Refresh';
         refreshBtn.onclick = () => {
@@ -4068,66 +4224,35 @@ function addGlobalStyle(css) {
         try {
             const windowConfig = getAnalyticsWindowConfig();
             const rangeParams = buildAnalyticsRangeParams(windowConfig);
-            const withRange = (params = {}) => ({ ...rangeParams, ...params });
-            const safeApi = (endpoint, params = {}) => {
-                const apiEndpoint = buildAnalyticsEndpoint(endpoint, params);
-                return makeApiRequest('GET', `/profiles/${pid}/analytics/${apiEndpoint}`, null, NDNS_API_KEY).catch((err) => {
-                    console.warn(`[NDNS] Analytics API failed for ${apiEndpoint}:`, err?.message || err);
-                    return null;
-                });
-            };
+            const profiles = await loadAnalyticsProfiles(pid);
 
-            const seriesPromise = windowConfig.bucketCount ? fetchAnalyticsStatusSeries(safeApi, windowConfig).catch((err) => {
-                console.warn('[NDNS] Analytics rollup failed:', err?.message || err);
-                return null;
-            }) : Promise.resolve([]);
+            console.log('[NDNS] Fetching analytics range:', windowConfig.key, 'scope:', analyticsScopeKey, 'profiles:', profiles.length);
 
-            console.log('[NDNS] Fetching analytics for profile:', pid, 'range:', windowConfig.key);
+            const payloads = [];
+            for (const profile of profiles) {
+                payloads.push(await fetchAnalyticsPayload(profile, windowConfig, rangeParams));
+            }
 
-            const [domains, blockedDomains, statusData, dnssecData, encryptionData, protocolsData, queryTypesData, ipVersionsData, destinationsData, devicesData, statusSeries] = await Promise.all([
-                safeApi('domains', withRange({ limit: 50 })),
-                safeApi('domains', withRange({ status: 'blocked', limit: 30 })),
-                safeApi('status', rangeParams),
-                safeApi('dnssec', rangeParams),
-                safeApi('encryption', rangeParams),
-                safeApi('protocols', rangeParams),
-                safeApi('queryTypes', rangeParams),
-                safeApi('ipVersions', rangeParams),
-                safeApi('destinations', rangeParams),
-                safeApi('devices', rangeParams),
-                seriesPromise
-            ]);
+            analyticsCache = mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, analyticsScopeKey);
+
+            if (analyticsScopeKey === 'current' && payloads[0]) {
+                try {
+                    analyticsCache.deviceDrilldowns = await fetchDeviceDrilldowns(payloads[0].safeApi, payloads[0].devices, rangeParams);
+                } catch (err) {
+                    console.warn('[NDNS] Device drill-down failed:', err?.message || err);
+                }
+            }
+
+            if (analyticsScopeKey === 'current') {
+                try {
+                    analyticsCache.categorySpikes = await fetchBlockedCategorySpikes(payloads[0]?.safeApi || buildAnalyticsSafeApi(pid), windowConfig);
+                    notifyBlockedCategorySpikes(pid, windowConfig.key, analyticsCache.categorySpikes);
+                } catch (err) {
+                    console.warn('[NDNS] Category anomaly detection failed:', err?.message || err);
+                }
+            }
 
             console.log('[NDNS] Analytics data loaded successfully');
-            let deviceDrilldowns = [];
-            try {
-                deviceDrilldowns = await fetchDeviceDrilldowns(safeApi, devicesData, rangeParams);
-            } catch (err) {
-                console.warn('[NDNS] Device drill-down failed:', err?.message || err);
-            }
-            let categorySpikes = [];
-            try {
-                categorySpikes = await fetchBlockedCategorySpikes(safeApi, windowConfig);
-                notifyBlockedCategorySpikes(pid, windowConfig.key, categorySpikes);
-            } catch (err) {
-                console.warn('[NDNS] Category anomaly detection failed:', err?.message || err);
-            }
-
-            analyticsCache = {
-                window: {
-                    key: windowConfig.key,
-                    label: windowConfig.label,
-                    description: windowConfig.description,
-                    range: rangeParams
-                },
-                domains: filterAnalyticsDomains(normalizeAnalyticsData(domains)), blocked: filterAnalyticsDomains(normalizeAnalyticsData(blockedDomains)), status: normalizeAnalyticsData(statusData),
-                dnssec: normalizeAnalyticsData(dnssecData), encryption: normalizeAnalyticsData(encryptionData), protocols: normalizeAnalyticsData(protocolsData),
-                queryTypes: normalizeAnalyticsData(queryTypesData), ipVersions: normalizeAnalyticsData(ipVersionsData),
-                destinations: normalizeAnalyticsData(destinationsData), devices: normalizeAnalyticsData(devicesData),
-                statusSeries: statusSeries || [],
-                deviceDrilldowns,
-                categorySpikes
-            };
 
             loading.remove();
             buildDashboardContent(container, analyticsCache);
@@ -4169,6 +4294,9 @@ function addGlobalStyle(css) {
             { value: String(uniqueDomains), label: 'Unique Domains', cls: 'blue', sub: 'Top queried' },
             { value: String(deviceCount), label: 'Devices', cls: 'orange', sub: 'Active' }
         ];
+        if (data.scope?.key === 'all') {
+            cardData.splice(4, 0, { value: String(data.scope.profileCount || 0), label: 'Profiles', cls: 'orange', sub: 'Merged' });
+        }
         cardData.forEach(c => {
             const card = document.createElement('div');
             card.className = 'ndns-stat-card';
@@ -4177,6 +4305,13 @@ function addGlobalStyle(css) {
         });
         container.appendChild(cards);
 
+        if (data.profileSummaries?.length > 1) {
+            const profileRow = document.createElement('div');
+            profileRow.className = 'ndns-widget-grid';
+            profileRow.appendChild(buildProfileSummaryWidget(data.profileSummaries));
+            container.appendChild(profileRow);
+        }
+
         if (data.statusSeries?.length) {
             const trendRow = document.createElement('div');
             trendRow.className = 'ndns-widget-grid';
@@ -4184,7 +4319,7 @@ function addGlobalStyle(css) {
             container.appendChild(trendRow);
         }
 
-        if (data.window?.range?.from) {
+        if (data.window?.range?.from && data.scope?.key === 'current') {
             const anomalyRow = document.createElement('div');
             anomalyRow.className = 'ndns-widget-grid';
             anomalyRow.appendChild(buildAnomalyWidget(data.categorySpikes || []));
@@ -4267,6 +4402,28 @@ function addGlobalStyle(css) {
             list.appendChild(row);
         });
         widget.appendChild(list);
+        return widget;
+    }
+
+    function buildProfileSummaryWidget(profiles) {
+        const widget = document.createElement('div');
+        widget.className = 'ndns-widget full-width';
+        const h4 = document.createElement('h4');
+        h4.textContent = 'Merged Profiles';
+        widget.appendChild(h4);
+
+        const table = document.createElement('table');
+        table.className = 'ndns-data-table';
+        table.innerHTML = '<thead><tr><th>Profile</th><th class="right">Queries</th><th class="right">Blocked</th><th class="right">Blocked %</th></tr></thead>';
+        const tbody = document.createElement('tbody');
+        (profiles || []).forEach((profile) => {
+            const tr = document.createElement('tr');
+            const pct = profile.total > 0 ? (profile.blocked / profile.total * 100).toFixed(1) : '0.0';
+            tr.innerHTML = `<td>${escapeHtml(profile.name)} <span style="color:var(--panel-text-secondary);font-family:monospace;">${escapeHtml(profile.id)}</span></td><td class="right mono">${profile.total.toLocaleString()}</td><td class="right mono">${profile.blocked.toLocaleString()}</td><td class="right mono">${pct}%</td>`;
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        widget.appendChild(table);
         return widget;
     }
 
@@ -4578,6 +4735,7 @@ function addGlobalStyle(css) {
 
     function exportAnalyticsCSV(pid) {
         if (!analyticsCache) { showToast('No analytics data loaded.', true); return; }
+        const exportSlug = analyticsCache.scope?.key === 'all' ? 'all-profiles' : pid;
         const sections = [];
         const addSection = (title, items) => {
             if (!items || items.length === 0) return;
@@ -4595,6 +4753,20 @@ function addGlobalStyle(css) {
         addSection('Protocols', analyticsCache.protocols);
         addSection('IP Versions', analyticsCache.ipVersions);
         addSection('Destinations', analyticsCache.destinations);
+        if (analyticsCache.profileSummaries?.length > 1) {
+            sections.push('\n# Merged Profiles');
+            sections.push('Profile,Profile ID,Total Queries,Allowed,Blocked,Blocked Percent');
+            analyticsCache.profileSummaries.forEach((profile) => {
+                sections.push([
+                    csvEscape(profile.name),
+                    csvEscape(profile.id),
+                    profile.total,
+                    profile.allowed,
+                    profile.blocked,
+                    profile.blockedPct.toFixed(1)
+                ].join(','));
+            });
+        }
         if (analyticsCache.deviceDrilldowns?.length) {
             sections.push('\n# Device App Drill-down');
             sections.push('Device,Device Queries,App Guess,App Queries,Top Domains');
@@ -4639,14 +4811,15 @@ function addGlobalStyle(css) {
                 ].join(','));
             });
         }
-        downloadFile(sections.join('\n'), `nextdns-analytics-${pid}-${analyticsCache.window?.key || 'api'}.csv`, 'text/csv');
+        downloadFile(sections.join('\n'), `nextdns-analytics-${exportSlug}-${analyticsCache.window?.key || 'api'}.csv`, 'text/csv');
         showToast('Full analytics exported as CSV.');
     }
 
     function exportAnalyticsJSON(pid) {
         if (!analyticsCache) { showToast('No analytics data loaded.', true); return; }
+        const exportSlug = analyticsCache.scope?.key === 'all' ? 'all-profiles' : pid;
         const exportData = { exportedAt: new Date().toISOString(), ...analyticsCache };
-        downloadFile(JSON.stringify(exportData, null, 2), `nextdns-analytics-${pid}-${analyticsCache.window?.key || 'api'}.json`, 'application/json');
+        downloadFile(JSON.stringify(exportData, null, 2), `nextdns-analytics-${exportSlug}-${analyticsCache.window?.key || 'api'}.json`, 'application/json');
         showToast('Full analytics exported as JSON.');
     }
 
@@ -4709,18 +4882,31 @@ function addGlobalStyle(css) {
         ]);
     }
 
+    function buildProfileReportRows(profiles) {
+        return (profiles || []).map(profile => [
+            profile.name,
+            profile.id,
+            profile.total.toLocaleString(),
+            profile.allowed.toLocaleString(),
+            profile.blocked.toLocaleString(),
+            `${profile.blockedPct.toFixed(1)}%`
+        ]);
+    }
+
     function buildAnalyticsReportHTML(pid) {
         const statusItems = resolveItems(analyticsCache.status);
         const summary = summarizeStatusItems(statusItems);
         const generatedAt = new Date().toLocaleString();
         const windowLabel = analyticsCache.window?.label || 'API Default';
         const windowDescription = analyticsCache.window?.description || 'Native NextDNS window';
+        const profileLabel = analyticsCache.scope?.key === 'all' ? `${analyticsCache.scope.profileCount} profiles` : pid;
         const topDomainRows = buildMetricRows(analyticsCache.domains, 20);
         const blockedRows = buildMetricRows(analyticsCache.blocked, 20);
         const deviceRows = buildMetricRows(analyticsCache.devices, 20);
         const deviceAppRows = buildDeviceReportRows(analyticsCache.deviceDrilldowns);
         const rollupRows = buildRollupReportRows(analyticsCache.statusSeries);
         const anomalyRows = buildAnomalyReportRows(analyticsCache.categorySpikes);
+        const profileRows = buildProfileReportRows(analyticsCache.profileSummaries?.length > 1 ? analyticsCache.profileSummaries : []);
 
         return `<!doctype html>
 <html>
@@ -4768,7 +4954,7 @@ function addGlobalStyle(css) {
         <p class="subtitle">Prepared from the loaded NDNS analytics dashboard.</p>
     </header>
     <section class="meta">
-        <div><span class="label">Profile</span><span class="value">${escapeHtml(pid)}</span></div>
+        <div><span class="label">Profile</span><span class="value">${escapeHtml(profileLabel)}</span></div>
         <div><span class="label">Range</span><span class="value">${escapeHtml(windowLabel)}</span></div>
         <div><span class="label">Rollup</span><span class="value">${escapeHtml(windowDescription)}</span></div>
         <div><span class="label">Generated</span><span class="value">${escapeHtml(generatedAt)}</span></div>
@@ -4780,6 +4966,7 @@ function addGlobalStyle(css) {
         <div class="card"><span class="label">Blocked Rate</span><strong>${summary.blockedPct.toFixed(1)}%</strong></div>
     </section>
     ${buildReportTable('Historical Rollup', ['Period', 'Total', 'Allowed', 'Blocked', 'Blocked %'], rollupRows)}
+    ${buildReportTable('Merged Profiles', ['Profile', 'ID', 'Total', 'Allowed', 'Blocked', 'Blocked %'], profileRows)}
     ${buildReportTable('Blocked Category Spikes', ['Category', 'Current', 'Previous', 'Ratio', 'Change %'], anomalyRows)}
     ${buildReportTable('Top Queried Domains', ['Domain', 'Queries', 'Share'], topDomainRows)}
     ${buildReportTable('Top Blocked Domains', ['Domain', 'Queries', 'Share'], blockedRows)}
@@ -5089,7 +5276,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.6'
+                    source: 'NDNS v3.4.7'
                 })
             });
         } catch {}
@@ -5732,7 +5919,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.6';
+        footer.textContent = 'NDNS v3.4.7';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
