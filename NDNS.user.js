@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.8
+// @version      3.4.9
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2655,6 +2655,151 @@ function addGlobalStyle(css) {
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
         textarea.focus();
+    }
+
+    function escapeRegexLiteral(value) {
+        return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function collectRecentLogDomains(limit = 250) {
+        const domains = new Set();
+        document.querySelectorAll('.list-group-item.log, .Logs .list-group .list-group-item').forEach((row) => {
+            const raw = row.dataset?.ndnsDomain || row.querySelector('.notranslate')?.textContent || '';
+            const domain = normalizeImportedDomain(raw);
+            if (domain) domains.add(domain);
+        });
+        return Array.from(domains).slice(0, limit);
+    }
+
+    function buildDomainMatcher(mode, pattern) {
+        const normalized = normalizeImportedDomain(pattern);
+        if (mode === 'regex') return new RegExp(pattern, 'i');
+        if (!normalized) return null;
+        if (mode === 'wildcard') {
+            const root = extractRootDomain(normalized);
+            return new RegExp(`(^|\\.)${escapeRegexLiteral(root)}$`, 'i');
+        }
+        return new RegExp(`^${escapeRegexLiteral(normalized)}$`, 'i');
+    }
+
+    function showWildcardBuilder() {
+        const pid = getCurrentProfileId();
+        if (!pid) return showToast('Could not find Profile ID.', true);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.onclick = (e) => e.stopPropagation();
+        modal.innerHTML = '<h3>Wildcard Builder</h3><p style="font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;">Build exact, wildcard-root, or regex matches from recently loaded log domains.</p>';
+
+        const modeSelect = document.createElement('select');
+        modeSelect.className = 'ndns-input';
+        modeSelect.innerHTML = '<option value="wildcard">Wildcard root (*.example.com)</option><option value="exact">Exact domain</option><option value="regex">Regex</option>';
+
+        const targetSelect = document.createElement('select');
+        targetSelect.className = 'ndns-input';
+        targetSelect.innerHTML = '<option value="deny">Add matches to denylist</option><option value="allow">Add matches to allowlist</option>';
+        targetSelect.style.marginTop = '8px';
+
+        const patternInput = document.createElement('input');
+        patternInput.className = 'ndns-input';
+        patternInput.placeholder = 'example.com or ^.*\\.example\\.com$';
+        patternInput.style.marginTop = '8px';
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size: 12px; color: var(--panel-text-secondary); margin-top: 8px;';
+
+        const preview = document.createElement('div');
+        preview.style.cssText = 'max-height:180px;overflow:auto;margin-top:8px;border:1px solid var(--panel-border);border-radius:8px;padding:8px;font-size:11px;font-family:monospace;';
+
+        const recentDomains = collectRecentLogDomains();
+        let currentMatches = [];
+
+        const renderPreview = () => {
+            preview.innerHTML = '';
+            currentMatches = [];
+            let matcher = null;
+            try {
+                matcher = buildDomainMatcher(modeSelect.value, patternInput.value);
+            } catch (error) {
+                statusEl.textContent = `Invalid regex: ${error.message}`;
+                return;
+            }
+            if (!matcher) {
+                statusEl.textContent = recentDomains.length ? 'Enter a domain or regex.' : 'No recent log domains found on this page.';
+                return;
+            }
+
+            currentMatches = recentDomains.filter(domain => matcher.test(domain));
+            const addDomains = getWildcardBuilderAddDomains(currentMatches, modeSelect.value);
+            statusEl.textContent = `${currentMatches.length}/${recentDomains.length} recent domains matched; ${addDomains.length} unique entries will be added.`;
+            if (currentMatches.length === 0) {
+                preview.innerHTML = '<div style="color:var(--panel-text-secondary);">No matches.</div>';
+                return;
+            }
+            currentMatches.slice(0, 80).forEach((domain) => {
+                const item = document.createElement('div');
+                item.textContent = domain;
+                preview.appendChild(item);
+            });
+        };
+
+        modeSelect.onchange = renderPreview;
+        patternInput.oninput = renderPreview;
+
+        const buttonRow = document.createElement('div');
+        buttonRow.style.cssText = 'display:flex;gap:8px;margin-top:12px;';
+
+        const addBtn = document.createElement('button');
+        addBtn.className = 'ndns-panel-button';
+        addBtn.textContent = 'Add Matches';
+        addBtn.onclick = async () => {
+            const domainsToAdd = getWildcardBuilderAddDomains(currentMatches, modeSelect.value);
+            if (domainsToAdd.length === 0) return showToast('No matched domains to add.', true);
+            addBtn.disabled = true;
+            let added = 0;
+            const failures = [];
+            for (let i = 0; i < domainsToAdd.length; i++) {
+                const domain = domainsToAdd[i];
+                statusEl.textContent = `Adding ${i + 1}/${domainsToAdd.length}: ${domain}`;
+                try {
+                    await addDomainToList(domain, targetSelect.value, pid);
+                    added++;
+                } catch (error) {
+                    failures.push(`${domain}: ${error.message || 'Unknown error'}`);
+                }
+                await sleep(120);
+            }
+            invalidateLogCache();
+            cleanLogs();
+            statusEl.textContent = failures.length
+                ? `Added ${added}/${domainsToAdd.length}. Failed: ${failures.slice(0, 3).join('; ')}`
+                : `Added ${added}/${domainsToAdd.length}.`;
+            showToast(`Added ${added} wildcard-builder entries${failures.length ? ` (${failures.length} failed)` : ''}.`, failures.length > 0);
+            addBtn.disabled = false;
+        };
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button danger';
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => overlay.remove();
+
+        buttonRow.append(addBtn, closeBtn);
+        modal.append(modeSelect, targetSelect, patternInput, statusEl, preview, buttonRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        renderPreview();
+        patternInput.focus();
+    }
+
+    function getWildcardBuilderAddDomains(matches, mode) {
+        const domains = mode === 'wildcard'
+            ? matches.map(domain => extractRootDomain(domain))
+            : matches;
+        return Array.from(new Set(domains.map(normalizeImportedDomain).filter(Boolean)));
     }
 
     async function removeDomainViaApi(domain, listType) {
@@ -5391,7 +5536,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.8'
+                    source: 'NDNS v3.4.9'
                 })
             });
         } catch {}
@@ -5672,6 +5817,11 @@ function addGlobalStyle(css) {
         bulkImportBtn.className = 'ndns-panel-button';
         bulkImportBtn.onclick = showBulkDomainImport;
 
+        const wildcardBuilderBtn = document.createElement('button');
+        wildcardBuilderBtn.textContent = 'Wildcard Builder';
+        wildcardBuilderBtn.className = 'ndns-panel-button';
+        wildcardBuilderBtn.onclick = showWildcardBuilder;
+
         const exportListBtn = document.createElement('button');
         exportListBtn.textContent = 'Export Hidden List';
         exportListBtn.className = 'ndns-panel-button';
@@ -5688,7 +5838,7 @@ function addGlobalStyle(css) {
             }
         };
 
-        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, importBtn, exportListBtn, clearBtn);
+        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, wildcardBuilderBtn, importBtn, exportListBtn, clearBtn);
         dataSection.appendChild(dataControls);
         modalBody.appendChild(dataSection);
 
@@ -6039,7 +6189,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.8';
+        footer.textContent = 'NDNS v3.4.9';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
