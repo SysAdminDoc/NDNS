@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.2
+// @version      3.4.3
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1369,6 +1369,38 @@ function addGlobalStyle(css) {
         .ndns-widget h4 .widget-icon { font-size: 15px; }
         .ndns-widget .widget-empty {
             font-size: 11px; color: var(--panel-text-secondary); text-align: center; padding: 20px 0;
+        }
+
+        /* Time Series */
+        .ndns-timeseries-chart {
+            width: 100%; overflow-x: auto; padding-bottom: 4px;
+        }
+        .ndns-timeseries-svg {
+            width: 100%; min-width: 640px; height: auto; display: block;
+        }
+        .ndns-timeseries-grid { stroke: var(--panel-border); stroke-width: 1; }
+        .ndns-timeseries-axis { fill: var(--panel-text-secondary); font-size: 10px; font-family: monospace; }
+        .ndns-timeseries-total {
+            fill: none; stroke: var(--accent-color); stroke-width: 3;
+            stroke-linecap: round; stroke-linejoin: round;
+        }
+        .ndns-timeseries-point { fill: var(--accent-color); stroke: var(--panel-bg-solid); stroke-width: 2; }
+        .ndns-timeseries-blocked { fill: var(--danger-color); opacity: 0.58; }
+        .ndns-timeseries-summary {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 8px; margin-top: 10px;
+        }
+        .ndns-timeseries-chip {
+            background: var(--btn-bg); border: 1px solid var(--btn-border);
+            border-radius: 8px; padding: 8px 10px;
+        }
+        .ndns-timeseries-chip span {
+            display: block; font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.4px; color: var(--panel-text-secondary);
+        }
+        .ndns-timeseries-chip strong {
+            display: block; margin-top: 3px; font-size: 15px; font-family: monospace;
+            color: var(--panel-text);
         }
 
         /* Bar Chart */
@@ -3611,8 +3643,15 @@ function addGlobalStyle(css) {
     // --- ANALYTICS ENHANCEMENTS ---
     // --- ANALYTICS DASHBOARD ---
     const ANALYTICS_RING_COLORS = ['#7f5af0','#2cb67d','#e53170','#4ea8de','#f0b429','#20c997','#ff6b6b','#845ef7','#ff922b','#74c0fc','#51cf66','#cc5de8'];
+    const ANALYTICS_DAY_MS = 24 * 60 * 60 * 1000;
+    const ANALYTICS_WINDOWS = [
+        { key: 'api', label: 'API Default', description: 'Native NextDNS window' },
+        { key: '90d', label: 'Last 90 Days', description: 'Weekly rollup', days: 90, bucketCount: 13 },
+        { key: '1y', label: 'Last 1 Year', description: 'Monthly rollup', days: 365, bucketCount: 12 }
+    ];
 
     let analyticsCache = null;
+    let analyticsWindowKey = '90d';
 
     async function initAnalyticsEnhancements() {
         if (!NDNS_API_KEY) return;
@@ -3648,6 +3687,94 @@ function addGlobalStyle(css) {
         setTimeout(() => clearInterval(waitForPage), 20000);
     }
 
+    function getAnalyticsWindowConfig(key = analyticsWindowKey) {
+        return ANALYTICS_WINDOWS.find(w => w.key === key) || ANALYTICS_WINDOWS[1];
+    }
+
+    function buildAnalyticsRangeParams(config) {
+        if (!config?.days) return {};
+        const to = new Date();
+        const from = new Date(to.getTime() - (config.days * ANALYTICS_DAY_MS));
+        return { from: from.toISOString(), to: to.toISOString() };
+    }
+
+    function buildAnalyticsEndpoint(endpoint, params = {}) {
+        const query = new URLSearchParams();
+        Object.entries(params).forEach(([key, value]) => {
+            if (value !== undefined && value !== null && value !== '') query.set(key, String(value));
+        });
+        const qs = query.toString();
+        return qs ? `${endpoint}?${qs}` : endpoint;
+    }
+
+    function normalizeAnalyticsData(data) {
+        if (!data) return [];
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data.data)) return data.data;
+        if (data.data && typeof data.data === 'object') {
+            return Object.entries(data.data).map(([k, v]) => ({ name: k, queries: typeof v === 'number' ? v : 0 }));
+        }
+        return [];
+    }
+
+    function filterAnalyticsDomains(items) {
+        return items.filter(d => d?.domain !== 'blockpage.nextdns.io' && d?.name !== 'blockpage.nextdns.io');
+    }
+
+    function summarizeStatusItems(items) {
+        const total = items.reduce((s, i) => s + i.value, 0);
+        const blocked = items.find(i => /block/i.test(i.name))?.value || 0;
+        const allowed = items.find(i => /allow|default|pass|ok/i.test(i.name))?.value || 0;
+        return {
+            total,
+            allowed,
+            blocked,
+            blockedPct: total > 0 ? (blocked / total * 100) : 0
+        };
+    }
+
+    function formatShortDate(date) {
+        return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    }
+
+    function formatAnalyticsNumber(value) {
+        if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+        if (value >= 1000) return `${(value / 1000).toFixed(1)}K`;
+        return String(value);
+    }
+
+    function buildAnalyticsBuckets(config) {
+        if (!config?.days || !config?.bucketCount) return [];
+        const to = new Date();
+        const from = new Date(to.getTime() - (config.days * ANALYTICS_DAY_MS));
+        const bucketMs = (to.getTime() - from.getTime()) / config.bucketCount;
+        return Array.from({ length: config.bucketCount }, (_, idx) => {
+            const bucketFrom = new Date(from.getTime() + (idx * bucketMs));
+            const bucketTo = idx === config.bucketCount - 1 ? to : new Date(from.getTime() + ((idx + 1) * bucketMs));
+            return {
+                from: bucketFrom,
+                to: bucketTo,
+                label: formatShortDate(bucketFrom)
+            };
+        });
+    }
+
+    async function fetchAnalyticsStatusSeries(safeApi, config) {
+        const buckets = buildAnalyticsBuckets(config);
+        const rows = [];
+        for (const bucket of buckets) {
+            const raw = await safeApi('status', { from: bucket.from.toISOString(), to: bucket.to.toISOString() });
+            const items = resolveItems(normalizeAnalyticsData(raw));
+            rows.push({
+                label: bucket.label,
+                from: bucket.from.toISOString(),
+                to: bucket.to.toISOString(),
+                ...summarizeStatusItems(items)
+            });
+        }
+        return rows;
+    }
+
     function buildAnalyticsHeader(pid, container) {
         const header = document.createElement('div');
         header.className = 'ndns-analytics-header';
@@ -3658,6 +3785,23 @@ function addGlobalStyle(css) {
 
         const controls = document.createElement('div');
         controls.className = 'ndns-analytics-controls';
+
+        const rangeSelect = document.createElement('select');
+        rangeSelect.setAttribute('aria-label', 'Analytics range');
+        ANALYTICS_WINDOWS.forEach((windowConfig) => {
+            const option = document.createElement('option');
+            option.value = windowConfig.key;
+            option.textContent = `${windowConfig.label} - ${windowConfig.description}`;
+            option.selected = windowConfig.key === analyticsWindowKey;
+            rangeSelect.appendChild(option);
+        });
+        rangeSelect.onchange = () => {
+            analyticsWindowKey = rangeSelect.value;
+            analyticsCache = null;
+            container.innerHTML = '';
+            renderAnalyticsDashboard(pid, container);
+        };
+        controls.appendChild(rangeSelect);
 
         const refreshBtn = document.createElement('button');
         refreshBtn.textContent = 'Refresh';
@@ -3692,41 +3836,52 @@ function addGlobalStyle(css) {
         container.appendChild(loading);
 
         try {
-            const safeApi = (endpoint) => makeApiRequest('GET', `/profiles/${pid}/analytics/${endpoint}`, null, NDNS_API_KEY).catch((err) => {
-                console.warn(`[NDNS] Analytics API failed for ${endpoint}:`, err?.message || err);
+            const windowConfig = getAnalyticsWindowConfig();
+            const rangeParams = buildAnalyticsRangeParams(windowConfig);
+            const withRange = (params = {}) => ({ ...rangeParams, ...params });
+            const safeApi = (endpoint, params = {}) => {
+                const apiEndpoint = buildAnalyticsEndpoint(endpoint, params);
+                return makeApiRequest('GET', `/profiles/${pid}/analytics/${apiEndpoint}`, null, NDNS_API_KEY).catch((err) => {
+                    console.warn(`[NDNS] Analytics API failed for ${apiEndpoint}:`, err?.message || err);
+                    return null;
+                });
+            };
+
+            const seriesPromise = windowConfig.bucketCount ? fetchAnalyticsStatusSeries(safeApi, windowConfig).catch((err) => {
+                console.warn('[NDNS] Analytics rollup failed:', err?.message || err);
                 return null;
-            });
+            }) : Promise.resolve([]);
 
-            console.log('[NDNS] Fetching analytics for profile:', pid);
+            console.log('[NDNS] Fetching analytics for profile:', pid, 'range:', windowConfig.key);
 
-            const [domains, blockedDomains, statusData, dnssecData, encryptionData, protocolsData, queryTypesData, ipVersionsData, destinationsData, devicesData] = await Promise.all([
-                safeApi('domains?limit=50'),
-                safeApi('domains?status=blocked&limit=30'),
-                safeApi('status'),
-                safeApi('dnssec'),
-                safeApi('encryption'),
-                safeApi('protocols'),
-                safeApi('queryTypes'),
-                safeApi('ipVersions'),
-                safeApi('destinations'),
-                safeApi('devices')
+            const [domains, blockedDomains, statusData, dnssecData, encryptionData, protocolsData, queryTypesData, ipVersionsData, destinationsData, devicesData, statusSeries] = await Promise.all([
+                safeApi('domains', withRange({ limit: 50 })),
+                safeApi('domains', withRange({ status: 'blocked', limit: 30 })),
+                safeApi('status', rangeParams),
+                safeApi('dnssec', rangeParams),
+                safeApi('encryption', rangeParams),
+                safeApi('protocols', rangeParams),
+                safeApi('queryTypes', rangeParams),
+                safeApi('ipVersions', rangeParams),
+                safeApi('destinations', rangeParams),
+                safeApi('devices', rangeParams),
+                seriesPromise
             ]);
 
             console.log('[NDNS] Analytics data loaded successfully');
 
-            const norm = (d) => {
-                if (!d) return [];
-                if (Array.isArray(d)) return d;
-                if (Array.isArray(d.data)) return d.data;
-                if (d.data && typeof d.data === 'object') return Object.entries(d.data).map(([k, v]) => ({ name: k, queries: typeof v === 'number' ? v : 0 }));
-                return [];
-            };
-            const excludeDomain = (arr) => arr.filter(d => d?.domain !== 'blockpage.nextdns.io' && d?.name !== 'blockpage.nextdns.io');
             analyticsCache = {
-                domains: excludeDomain(norm(domains)), blocked: excludeDomain(norm(blockedDomains)), status: norm(statusData),
-                dnssec: norm(dnssecData), encryption: norm(encryptionData), protocols: norm(protocolsData),
-                queryTypes: norm(queryTypesData), ipVersions: norm(ipVersionsData),
-                destinations: norm(destinationsData), devices: norm(devicesData)
+                window: {
+                    key: windowConfig.key,
+                    label: windowConfig.label,
+                    description: windowConfig.description,
+                    range: rangeParams
+                },
+                domains: filterAnalyticsDomains(normalizeAnalyticsData(domains)), blocked: filterAnalyticsDomains(normalizeAnalyticsData(blockedDomains)), status: normalizeAnalyticsData(statusData),
+                dnssec: normalizeAnalyticsData(dnssecData), encryption: normalizeAnalyticsData(encryptionData), protocols: normalizeAnalyticsData(protocolsData),
+                queryTypes: normalizeAnalyticsData(queryTypesData), ipVersions: normalizeAnalyticsData(ipVersionsData),
+                destinations: normalizeAnalyticsData(destinationsData), devices: normalizeAnalyticsData(devicesData),
+                statusSeries: statusSeries || []
             };
 
             loading.remove();
@@ -3752,10 +3907,11 @@ function addGlobalStyle(css) {
     function buildDashboardContent(container, data) {
         // --- Summary Stat Cards ---
         const statusItems = resolveItems(data.status);
-        const totalQueries = statusItems.reduce((s, i) => s + i.value, 0);
-        const blockedCount = statusItems.find(i => /block/i.test(i.name))?.value || 0;
-        const allowedCount = statusItems.find(i => /allow|default|pass|ok/i.test(i.name))?.value || 0;
-        const blockedPct = totalQueries > 0 ? (blockedCount / totalQueries * 100).toFixed(1) : '0.0';
+        const statusSummary = summarizeStatusItems(statusItems);
+        const totalQueries = statusSummary.total;
+        const blockedCount = statusSummary.blocked;
+        const allowedCount = statusSummary.allowed;
+        const blockedPct = statusSummary.blockedPct.toFixed(1);
         const uniqueDomains = (data.domains || []).length;
         const deviceCount = resolveItems(data.devices).length;
 
@@ -3775,6 +3931,13 @@ function addGlobalStyle(css) {
             cards.appendChild(card);
         });
         container.appendChild(cards);
+
+        if (data.statusSeries?.length) {
+            const trendRow = document.createElement('div');
+            trendRow.className = 'ndns-widget-grid';
+            trendRow.appendChild(buildTimeSeriesWidget(data.statusSeries, data.window));
+            container.appendChild(trendRow);
+        }
 
         // --- Row 1: Status Breakdown Ring + Query Types Ring ---
         const row1 = document.createElement('div');
@@ -3814,6 +3977,84 @@ function addGlobalStyle(css) {
     }
 
     // --- Widget Builders ---
+    function buildTimeSeriesWidget(series, windowMeta) {
+        const widget = document.createElement('div');
+        widget.className = 'ndns-widget full-width';
+        const h4 = document.createElement('h4');
+        h4.textContent = `${windowMeta?.label || 'Historical'} Query Rollup`;
+        widget.appendChild(h4);
+
+        const points = (series || []).filter(point => point && Number.isFinite(point.total));
+        const activePoints = points.filter(point => point.total > 0 || point.allowed > 0 || point.blocked > 0);
+        if (activePoints.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'widget-empty';
+            empty.textContent = 'No historical rollup data available';
+            widget.appendChild(empty);
+            return widget;
+        }
+
+        const width = 760;
+        const height = 220;
+        const padLeft = 54;
+        const padRight = 20;
+        const padTop = 18;
+        const padBottom = 42;
+        const plotWidth = width - padLeft - padRight;
+        const plotHeight = height - padTop - padBottom;
+        const maxTotal = Math.max(...points.map(point => point.total), 1);
+        const xFor = (idx) => padLeft + (points.length === 1 ? plotWidth / 2 : (idx / (points.length - 1)) * plotWidth);
+        const yFor = (value) => padTop + plotHeight - ((value / maxTotal) * plotHeight);
+        const linePoints = points.map((point, idx) => `${xFor(idx).toFixed(1)},${yFor(point.total).toFixed(1)}`).join(' ');
+        const labelEvery = Math.max(1, Math.ceil(points.length / 6));
+        const avgTotal = Math.round(points.reduce((s, point) => s + point.total, 0) / points.length);
+        const avgBlockedPct = points.reduce((s, point) => s + point.blockedPct, 0) / points.length;
+        const peak = points.reduce((best, point) => point.total > best.total ? point : best, points[0]);
+        const latest = points[points.length - 1];
+
+        const gridLines = [0, 0.25, 0.5, 0.75, 1].map((step) => {
+            const y = padTop + (plotHeight * step);
+            const labelValue = Math.round(maxTotal * (1 - step));
+            return `<line class="ndns-timeseries-grid" x1="${padLeft}" y1="${y.toFixed(1)}" x2="${width - padRight}" y2="${y.toFixed(1)}"></line><text class="ndns-timeseries-axis" x="${padLeft - 8}" y="${(y + 3).toFixed(1)}" text-anchor="end">${escapeHtml(formatAnalyticsNumber(labelValue))}</text>`;
+        }).join('');
+        const bars = points.map((point, idx) => {
+            const x = xFor(idx);
+            const barWidth = Math.max(8, Math.min(34, (plotWidth / points.length) * 0.46));
+            const barHeight = Math.max(0, (point.blocked / maxTotal) * plotHeight);
+            const y = padTop + plotHeight - barHeight;
+            return `<rect class="ndns-timeseries-blocked" x="${(x - barWidth / 2).toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barHeight.toFixed(1)}" rx="3"><title>${escapeHtml(point.label)} blocked: ${point.blocked.toLocaleString()}</title></rect>`;
+        }).join('');
+        const dots = points.map((point, idx) => `<circle class="ndns-timeseries-point" cx="${xFor(idx).toFixed(1)}" cy="${yFor(point.total).toFixed(1)}" r="4"><title>${escapeHtml(point.label)} total: ${point.total.toLocaleString()}</title></circle>`).join('');
+        const labels = points.map((point, idx) => {
+            if (idx !== 0 && idx !== points.length - 1 && idx % labelEvery !== 0) return '';
+            return `<text class="ndns-timeseries-axis" x="${xFor(idx).toFixed(1)}" y="${height - 14}" text-anchor="middle">${escapeHtml(point.label)}</text>`;
+        }).join('');
+
+        const chart = document.createElement('div');
+        chart.className = 'ndns-timeseries-chart';
+        chart.innerHTML = `
+            <svg class="ndns-timeseries-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(windowMeta?.label || 'Historical')} query trend">
+                ${gridLines}
+                ${bars}
+                <polyline class="ndns-timeseries-total" points="${linePoints}"></polyline>
+                ${dots}
+                ${labels}
+            </svg>
+        `;
+        widget.appendChild(chart);
+
+        const summary = document.createElement('div');
+        summary.className = 'ndns-timeseries-summary';
+        summary.innerHTML = `
+            <div class="ndns-timeseries-chip"><span>Latest bucket</span><strong>${latest.total.toLocaleString()}</strong></div>
+            <div class="ndns-timeseries-chip"><span>Average bucket</span><strong>${avgTotal.toLocaleString()}</strong></div>
+            <div class="ndns-timeseries-chip"><span>Peak bucket</span><strong>${peak.total.toLocaleString()}</strong></div>
+            <div class="ndns-timeseries-chip"><span>Avg blocked</span><strong>${avgBlockedPct.toFixed(1)}%</strong></div>
+        `;
+        widget.appendChild(summary);
+        return widget;
+    }
+
     function buildBarWidget(title, rawData, limit, colorClass) {
         const widget = document.createElement('div');
         widget.className = 'ndns-widget';
@@ -4005,14 +4246,29 @@ function addGlobalStyle(css) {
         addSection('Protocols', analyticsCache.protocols);
         addSection('IP Versions', analyticsCache.ipVersions);
         addSection('Destinations', analyticsCache.destinations);
-        downloadFile(sections.join('\n'), `nextdns-analytics-${pid}.csv`, 'text/csv');
+        if (analyticsCache.statusSeries?.length) {
+            sections.push('\n# Historical Rollup');
+            sections.push('Period,From,To,Total Queries,Allowed,Blocked,Blocked Percent');
+            analyticsCache.statusSeries.forEach((point) => {
+                sections.push([
+                    csvEscape(point.label),
+                    csvEscape(point.from),
+                    csvEscape(point.to),
+                    point.total,
+                    point.allowed,
+                    point.blocked,
+                    point.blockedPct.toFixed(1)
+                ].join(','));
+            });
+        }
+        downloadFile(sections.join('\n'), `nextdns-analytics-${pid}-${analyticsCache.window?.key || 'api'}.csv`, 'text/csv');
         showToast('Full analytics exported as CSV.');
     }
 
     function exportAnalyticsJSON(pid) {
         if (!analyticsCache) { showToast('No analytics data loaded.', true); return; }
         const exportData = { exportedAt: new Date().toISOString(), ...analyticsCache };
-        downloadFile(JSON.stringify(exportData, null, 2), `nextdns-analytics-${pid}.json`, 'application/json');
+        downloadFile(JSON.stringify(exportData, null, 2), `nextdns-analytics-${pid}-${analyticsCache.window?.key || 'api'}.json`, 'application/json');
         showToast('Full analytics exported as JSON.');
     }
 
@@ -4291,7 +4547,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.0'
+                    source: 'NDNS v3.4.3'
                 })
             });
         } catch {}
@@ -4934,7 +5190,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.2';
+        footer.textContent = 'NDNS v3.4.3';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
