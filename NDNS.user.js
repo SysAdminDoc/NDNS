@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.21
+// @version      3.4.22
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -94,6 +94,7 @@ function addGlobalStyle(css) {
     const KEY_WEBHOOK_RATE_LIMIT = `${KEY_PREFIX}webhook_rate_limit_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
     const KEY_PARENTAL_WEEKLY_SCHEDULE = `${KEY_PREFIX}parental_weekly_schedule_v1`;
+    const KEY_PARENTAL_DEVICE_OVERRIDES = `${KEY_PREFIX}parental_device_overrides_v1`;
 
     // --- HAGEZI CONFIG ---
     const HAGEZI_TLDS_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-aggressive.txt";
@@ -150,6 +151,10 @@ function addGlobalStyle(css) {
     let parentalWeeklyTimer = null;
     let parentalWeeklyApplying = false;
     let parentalWeeklyLastErrorAt = 0;
+    let parentalDeviceOverrides = { rules: [], activeRuleId: null, previousRecreationEnabled: null };
+    let parentalDeviceOverrideTimer = null;
+    let parentalDeviceOverrideApplying = false;
+    let parentalDeviceOverrideLastErrorAt = 0;
     // SLDs for proper root domain detection (unified list used everywhere)
     const SLDs = new Set(["co", "com", "org", "edu", "gov", "mil", "net", "ac", "or", "ne", "go", "ltd"]);
 
@@ -1637,6 +1642,38 @@ function addGlobalStyle(css) {
         }
         .ndns-weekly-schedule-cell.now { outline: 2px solid var(--warning-color); outline-offset: 1px; }
         .ndns-weekly-schedule-status { font-size: 10px; color: var(--panel-text-secondary); margin-top: 6px; }
+        .ndns-device-overrides { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--panel-border); }
+        .ndns-device-override-form {
+            display: grid; grid-template-columns: 1fr 76px 76px 112px auto; gap: 6px;
+            align-items: center; margin: 6px 0;
+        }
+        .ndns-device-override-form input,
+        .ndns-device-override-form select {
+            min-width: 0; padding: 5px 6px; border-radius: 4px; font-size: 11px;
+            background: var(--input-bg); color: var(--input-text); border: 1px solid var(--input-border);
+        }
+        .ndns-device-override-days { display: flex; flex-wrap: wrap; gap: 3px; margin: 4px 0 6px; }
+        .ndns-device-override-day {
+            width: 28px; height: 22px; padding: 0; border-radius: 4px;
+            border: 1px solid var(--panel-border); background: var(--btn-bg); color: var(--panel-text);
+            font-size: 10px; cursor: pointer;
+        }
+        .ndns-device-override-day.active {
+            background: var(--accent-color); border-color: var(--accent-color); color: #fffffe;
+        }
+        .ndns-device-override-row {
+            display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center;
+            padding: 6px 8px; margin-top: 4px; border-radius: 5px; background: var(--section-bg);
+            font-size: 11px;
+        }
+        .ndns-device-override-row.active { outline: 1px solid var(--warning-color); }
+        .ndns-device-override-title { font-weight: 600; color: var(--panel-text); }
+        .ndns-device-override-meta { margin-top: 2px; color: var(--panel-text-secondary); font-size: 10px; }
+        .ndns-device-override-status { font-size: 10px; color: var(--panel-text-secondary); margin-top: 5px; }
+        @media (max-width: 720px) {
+            .ndns-device-override-form { grid-template-columns: 1fr 1fr; }
+            .ndns-device-override-form button { grid-column: span 2; }
+        }
 
         /* Scheduled Logs */
         .ndns-schedule-config { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
@@ -1899,7 +1936,8 @@ function addGlobalStyle(css) {
             [KEY_WEBHOOK_DELIVERIES]: [],
             [KEY_WEBHOOK_RATE_LIMIT]: 60,
             [KEY_SHOW_CNAME_CHAIN]: true,
-            [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null }
+            [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null },
+            [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null }
         });
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
         hiddenDomains = new Set(values[KEY_HIDDEN_DOMAINS]);
@@ -1939,6 +1977,7 @@ function addGlobalStyle(css) {
         webhookRateLimitSeconds = Number(values[KEY_WEBHOOK_RATE_LIMIT] ?? 60);
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
         parentalWeeklySchedule = normalizeParentalWeeklySchedule(values[KEY_PARENTAL_WEEKLY_SCHEDULE]);
+        parentalDeviceOverrides = normalizeParentalDeviceOverrides(values[KEY_PARENTAL_DEVICE_OVERRIDES]);
     }
 
     async function makeApiRequest(method, endpoint, body = null, apiKey = NDNS_API_KEY, customUrl = null) {
@@ -6214,6 +6253,7 @@ function addGlobalStyle(css) {
 
     // --- PARENTAL WEEKLY SCHEDULE ---
     const PARENTAL_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const PARENTAL_DEVICE_OVERRIDE_ACTIVITY_MINUTES = 60;
 
     function createDefaultWeeklySlots() {
         return Array.from({ length: 7 }, () => Array(24).fill(false));
@@ -6257,6 +6297,7 @@ function addGlobalStyle(css) {
 
     async function applyParentalWeeklySchedule() {
         if (!parentalWeeklySchedule.enabled || parentalWeeklyApplying || !NDNS_API_KEY) return;
+        if (parentalDeviceOverrides.activeRuleId) return;
         const pid = getCurrentProfileId();
         if (!pid) return;
 
@@ -6301,6 +6342,390 @@ function addGlobalStyle(css) {
         parentalWeeklyTimer = setInterval(applyParentalWeeklySchedule, 60000);
     }
 
+    // --- PARENTAL DEVICE OVERRIDES ---
+    function normalizeTimeValue(value, fallback) {
+        const text = String(value || '').trim();
+        return /^\d{2}:\d{2}$/.test(text) ? text : fallback;
+    }
+
+    function normalizeParentalDeviceOverrides(value = {}) {
+        value = value && typeof value === 'object' ? value : {};
+        const rawRules = Array.isArray(value) ? value : (Array.isArray(value.rules) ? value.rules : []);
+        const rules = rawRules.map((rule, idx) => {
+            const deviceId = String(rule?.deviceId || rule?.device || '').trim();
+            if (!deviceId) return null;
+            const days = Array.isArray(rule.days) ? rule.days.map(Number).filter(day => day >= 0 && day <= 6) : [0, 1, 2, 3, 4, 5, 6];
+            const uniqueDays = Array.from(new Set(days)).sort((a, b) => a - b);
+            return {
+                id: String(rule.id || `${deviceId}-${idx}`),
+                deviceId,
+                deviceName: String(rule.deviceName || rule.name || deviceId).trim() || deviceId,
+                days: uniqueDays.length ? uniqueDays : [0, 1, 2, 3, 4, 5, 6],
+                start: normalizeTimeValue(rule.start, '20:00'),
+                end: normalizeTimeValue(rule.end, '07:00'),
+                action: rule.action === 'on' ? 'on' : 'off',
+                enabled: rule.enabled !== false,
+                lastApplied: Number.isFinite(Number(rule.lastApplied)) ? Number(rule.lastApplied) : null
+            };
+        }).filter(Boolean).slice(0, 20);
+        const activeRuleId = rules.some(rule => rule.id === value.activeRuleId) ? value.activeRuleId : null;
+
+        return {
+            rules,
+            activeRuleId,
+            previousRecreationEnabled: typeof value.previousRecreationEnabled === 'boolean' ? value.previousRecreationEnabled : null
+        };
+    }
+
+    async function saveParentalDeviceOverrides() {
+        parentalDeviceOverrides = normalizeParentalDeviceOverrides(parentalDeviceOverrides);
+        await storage.set({ [KEY_PARENTAL_DEVICE_OVERRIDES]: parentalDeviceOverrides });
+    }
+
+    function timeToMinutes(value) {
+        const [hours, minutes] = normalizeTimeValue(value, '00:00').split(':').map(Number);
+        return (hours * 60) + minutes;
+    }
+
+    function isTimeWithinWindow(start, end, date = new Date()) {
+        const startMinutes = timeToMinutes(start);
+        const endMinutes = timeToMinutes(end);
+        const nowMinutes = (date.getHours() * 60) + date.getMinutes();
+        if (startMinutes === endMinutes) return true;
+        if (startMinutes < endMinutes) return nowMinutes >= startMinutes && nowMinutes < endMinutes;
+        return nowMinutes >= startMinutes || nowMinutes < endMinutes;
+    }
+
+    function getScheduleDayForWindow(start, end, date = new Date()) {
+        const startMinutes = timeToMinutes(start);
+        const endMinutes = timeToMinutes(end);
+        const nowMinutes = (date.getHours() * 60) + date.getMinutes();
+        if (startMinutes > endMinutes && nowMinutes < endMinutes) return (date.getDay() + 6) % 7;
+        return date.getDay();
+    }
+
+    function formatDeviceOverrideDays(days) {
+        return (days || []).map(day => PARENTAL_WEEKDAYS[day]).filter(Boolean).join(', ');
+    }
+
+    async function fetchParentalDeviceOptions(pid) {
+        const to = new Date();
+        const from = new Date(to.getTime() - (30 * ANALYTICS_DAY_MS));
+        const raw = await makeApiRequest('GET', `/profiles/${pid}/analytics/${buildAnalyticsEndpoint('devices', {
+            from: from.toISOString(),
+            to: to.toISOString(),
+            limit: 100
+        })}`, null, NDNS_API_KEY).catch((err) => {
+            console.warn('[NDNS] Device option lookup failed:', err?.message || err);
+            return null;
+        });
+
+        return normalizeAnalyticsData(raw)
+            .map(normalizeDeviceItem)
+            .filter(device => device.id && device.id !== 'unknown-device')
+            .sort((a, b) => b.queries - a.queries);
+    }
+
+    async function fetchRecentDeviceActivity(pid) {
+        const to = new Date();
+        const from = new Date(to.getTime() - (PARENTAL_DEVICE_OVERRIDE_ACTIVITY_MINUTES * 60000));
+        const raw = await makeApiRequest('GET', `/profiles/${pid}/analytics/${buildAnalyticsEndpoint('devices', {
+            from: from.toISOString(),
+            to: to.toISOString(),
+            limit: 100
+        })}`, null, NDNS_API_KEY);
+
+        return normalizeAnalyticsData(raw)
+            .map(normalizeDeviceItem)
+            .filter(device => device.queries > 0);
+    }
+
+    function isDeviceActiveForRule(rule, devices) {
+        const wantedId = String(rule.deviceId || '').toLowerCase();
+        const wantedName = String(rule.deviceName || '').toLowerCase();
+        return devices.some((device) => {
+            const deviceId = String(device.id || '').toLowerCase();
+            const deviceName = String(device.name || '').toLowerCase();
+            return deviceId === wantedId || deviceName === wantedId || deviceName === wantedName;
+        });
+    }
+
+    function isDeviceOverrideRuleActive(rule, devices, date = new Date()) {
+        if (!rule.enabled || !isTimeWithinWindow(rule.start, rule.end, date)) return false;
+        const scheduleDay = getScheduleDayForWindow(rule.start, rule.end, date);
+        return rule.days.includes(scheduleDay) && isDeviceActiveForRule(rule, devices);
+    }
+
+    function updateParentalDeviceOverrideStatusElement(message = null) {
+        const status = document.getElementById('ndns-device-override-status');
+        if (!status) return;
+        if (message) {
+            status.textContent = message;
+            return;
+        }
+        const activeRule = parentalDeviceOverrides.rules.find(rule => rule.id === parentalDeviceOverrides.activeRuleId);
+        if (activeRule) {
+            status.textContent = `Active override: ${activeRule.deviceName} -> Recreation ${activeRule.action === 'on' ? 'on' : 'off'}.`;
+        } else if (parentalDeviceOverrides.rules.length) {
+            status.textContent = `${parentalDeviceOverrides.rules.length} device override${parentalDeviceOverrides.rules.length === 1 ? '' : 's'} saved.`;
+        } else {
+            status.textContent = 'No device overrides saved.';
+        }
+    }
+
+    async function setParentalRecreationTime(pid, desired) {
+        const config = await makeApiRequest('GET', `/profiles/${pid}/parentalControl`, null, NDNS_API_KEY);
+        const current = !!config.recreationTime?.enabled;
+        if (current !== desired) {
+            const recreationTime = { ...(config.recreationTime || {}), enabled: desired };
+            await makeApiRequest('PATCH', `/profiles/${pid}/parentalControl`, { recreationTime }, NDNS_API_KEY);
+        }
+        return current;
+    }
+
+    async function applyParentalDeviceOverrides() {
+        if (parentalDeviceOverrideApplying || !NDNS_API_KEY) return;
+        const pid = getCurrentProfileId();
+        if (!pid) return;
+
+        const enabledRules = parentalDeviceOverrides.rules.filter(rule => rule.enabled);
+        if (!enabledRules.length && !parentalDeviceOverrides.activeRuleId) {
+            updateParentalDeviceOverrideStatusElement();
+            return;
+        }
+
+        parentalDeviceOverrideApplying = true;
+        try {
+            const devices = enabledRules.length ? await fetchRecentDeviceActivity(pid) : [];
+            const activeRules = enabledRules.filter(rule => isDeviceOverrideRuleActive(rule, devices));
+
+            if (activeRules.length) {
+                const activeRule = activeRules[activeRules.length - 1];
+                const desired = activeRule.action === 'on';
+                const current = await setParentalRecreationTime(pid, desired);
+                if (parentalDeviceOverrides.activeRuleId !== activeRule.id && typeof parentalDeviceOverrides.previousRecreationEnabled !== 'boolean') {
+                    parentalDeviceOverrides.previousRecreationEnabled = current;
+                }
+                parentalDeviceOverrides.activeRuleId = activeRule.id;
+                activeRule.lastApplied = Date.now();
+                await saveParentalDeviceOverrides();
+            } else if (parentalDeviceOverrides.activeRuleId) {
+                const fallback = parentalWeeklySchedule.enabled
+                    ? isParentalWeeklySlotActive()
+                    : parentalDeviceOverrides.previousRecreationEnabled;
+                if (typeof fallback === 'boolean') await setParentalRecreationTime(pid, fallback);
+                parentalDeviceOverrides.activeRuleId = null;
+                parentalDeviceOverrides.previousRecreationEnabled = null;
+                await saveParentalDeviceOverrides();
+            }
+
+            parentalDeviceOverrideLastErrorAt = 0;
+            updateParentalDeviceOverrideStatusElement();
+        } catch (e) {
+            const now = Date.now();
+            if (now - parentalDeviceOverrideLastErrorAt > 300000) {
+                showToast(`Device override failed: ${e.message}`, true, 5000);
+                parentalDeviceOverrideLastErrorAt = now;
+            }
+        } finally {
+            parentalDeviceOverrideApplying = false;
+        }
+    }
+
+    function initParentalDeviceOverrides() {
+        if (parentalDeviceOverrideTimer) {
+            clearInterval(parentalDeviceOverrideTimer);
+            parentalDeviceOverrideTimer = null;
+        }
+
+        const hasEnabledRules = parentalDeviceOverrides.rules.some(rule => rule.enabled);
+        if (hasEnabledRules || parentalDeviceOverrides.activeRuleId) applyParentalDeviceOverrides();
+        if (hasEnabledRules) {
+            parentalDeviceOverrideTimer = setInterval(applyParentalDeviceOverrides, 60000);
+        } else {
+            updateParentalDeviceOverrideStatusElement();
+        }
+    }
+
+    function buildParentalDeviceOverrideManager(pid, deviceOptions) {
+        const wrap = document.createElement('div');
+        wrap.className = 'ndns-device-overrides';
+
+        const header = document.createElement('div');
+        header.className = 'settings-control-row';
+        const label = document.createElement('span');
+        label.textContent = 'Device Overrides';
+        const runBtn = document.createElement('button');
+        runBtn.type = 'button';
+        runBtn.className = 'ndns-panel-button ndns-btn-sm';
+        runBtn.textContent = 'Run';
+        runBtn.onclick = () => applyParentalDeviceOverrides();
+        header.append(label, runBtn);
+        wrap.appendChild(header);
+
+        const listId = `ndns-device-override-options-${pid}`;
+        const deviceInput = document.createElement('input');
+        deviceInput.setAttribute('list', listId);
+        deviceInput.placeholder = 'Device ID or name';
+        deviceInput.autocomplete = 'off';
+        const dataList = document.createElement('datalist');
+        dataList.id = listId;
+        deviceOptions.forEach((device) => {
+            const option = document.createElement('option');
+            option.value = device.id;
+            option.label = device.name === device.id ? device.id : `${device.name} (${device.id})`;
+            dataList.appendChild(option);
+        });
+
+        const startInput = document.createElement('input');
+        startInput.type = 'time';
+        startInput.value = '20:00';
+        startInput.setAttribute('aria-label', 'Override start time');
+
+        const endInput = document.createElement('input');
+        endInput.type = 'time';
+        endInput.value = '07:00';
+        endInput.setAttribute('aria-label', 'Override end time');
+
+        const actionSelect = document.createElement('select');
+        actionSelect.setAttribute('aria-label', 'Override action');
+        [
+            { value: 'off', label: 'Recreation Off' },
+            { value: 'on', label: 'Recreation On' }
+        ].forEach((item) => {
+            const option = document.createElement('option');
+            option.value = item.value;
+            option.textContent = item.label;
+            actionSelect.appendChild(option);
+        });
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'ndns-panel-button ndns-btn-sm';
+        addBtn.textContent = 'Add';
+
+        const form = document.createElement('div');
+        form.className = 'ndns-device-override-form';
+        form.append(deviceInput, startInput, endInput, actionSelect, addBtn);
+        wrap.append(dataList, form);
+
+        const selectedDays = new Set([0, 1, 2, 3, 4, 5, 6]);
+        const dayControls = document.createElement('div');
+        dayControls.className = 'ndns-device-override-days';
+        PARENTAL_WEEKDAYS.forEach((dayLabel, day) => {
+            const dayBtn = document.createElement('button');
+            dayBtn.type = 'button';
+            dayBtn.className = 'ndns-device-override-day active';
+            dayBtn.textContent = dayLabel;
+            dayBtn.onclick = () => {
+                if (selectedDays.has(day)) selectedDays.delete(day);
+                else selectedDays.add(day);
+                dayBtn.classList.toggle('active', selectedDays.has(day));
+            };
+            dayControls.appendChild(dayBtn);
+        });
+        wrap.appendChild(dayControls);
+
+        const rulesList = document.createElement('div');
+        wrap.appendChild(rulesList);
+
+        const status = document.createElement('div');
+        status.id = 'ndns-device-override-status';
+        status.className = 'ndns-device-override-status';
+        wrap.appendChild(status);
+
+        const findDeviceOption = (value) => {
+            const needle = String(value || '').toLowerCase();
+            return deviceOptions.find(device => String(device.id).toLowerCase() === needle || String(device.name).toLowerCase() === needle);
+        };
+
+        const renderRules = () => {
+            parentalDeviceOverrides = normalizeParentalDeviceOverrides(parentalDeviceOverrides);
+            rulesList.innerHTML = '';
+            if (!parentalDeviceOverrides.rules.length) {
+                updateParentalDeviceOverrideStatusElement();
+                return;
+            }
+
+            parentalDeviceOverrides.rules.forEach((rule) => {
+                const row = document.createElement('div');
+                row.className = `ndns-device-override-row ${parentalDeviceOverrides.activeRuleId === rule.id ? 'active' : ''}`.trim();
+
+                const info = document.createElement('div');
+                const actionText = rule.action === 'on' ? 'Recreation On' : 'Recreation Off';
+                info.innerHTML = `
+                    <div class="ndns-device-override-title">${escapeHtml(rule.deviceName)}</div>
+                    <div class="ndns-device-override-meta">${escapeHtml(formatDeviceOverrideDays(rule.days))} ${escapeHtml(rule.start)}-${escapeHtml(rule.end)} / ${escapeHtml(actionText)}</div>
+                `;
+
+                const sw = document.createElement('div');
+                sw.className = `ndns-toggle-switch ${rule.enabled ? 'active' : ''}`;
+                sw.onclick = async () => {
+                    rule.enabled = !rule.enabled;
+                    sw.classList.toggle('active', rule.enabled);
+                    if (!rule.enabled && parentalDeviceOverrides.activeRuleId === rule.id) {
+                        await applyParentalDeviceOverrides();
+                    }
+                    await saveParentalDeviceOverrides();
+                    renderRules();
+                    initParentalDeviceOverrides();
+                };
+
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'delete-btn';
+                delBtn.textContent = 'Del';
+                delBtn.onclick = async () => {
+                    const wasActive = parentalDeviceOverrides.activeRuleId === rule.id;
+                    parentalDeviceOverrides.rules = parentalDeviceOverrides.rules.filter(item => item.id !== rule.id);
+                    if (wasActive) await applyParentalDeviceOverrides();
+                    await saveParentalDeviceOverrides();
+                    renderRules();
+                    initParentalDeviceOverrides();
+                };
+
+                row.append(info, sw, delBtn);
+                rulesList.appendChild(row);
+            });
+            updateParentalDeviceOverrideStatusElement();
+        };
+
+        addBtn.onclick = async () => {
+            const rawDevice = deviceInput.value.trim();
+            if (!rawDevice) {
+                showToast('Enter a device ID or name.', true);
+                return;
+            }
+            if (!selectedDays.size) {
+                showToast('Select at least one day.', true);
+                return;
+            }
+
+            const matchedDevice = findDeviceOption(rawDevice);
+            const deviceId = matchedDevice?.id || rawDevice;
+            const deviceName = matchedDevice?.name || rawDevice;
+            parentalDeviceOverrides.rules.push({
+                id: `pdo-${Date.now().toString(36)}`,
+                deviceId,
+                deviceName,
+                days: Array.from(selectedDays).sort((a, b) => a - b),
+                start: normalizeTimeValue(startInput.value, '20:00'),
+                end: normalizeTimeValue(endInput.value, '07:00'),
+                action: actionSelect.value === 'on' ? 'on' : 'off',
+                enabled: true,
+                lastApplied: null
+            });
+            deviceInput.value = '';
+            await saveParentalDeviceOverrides();
+            renderRules();
+            initParentalDeviceOverrides();
+            showToast('Device override saved.');
+        };
+
+        renderRules();
+        return wrap;
+    }
+
     // --- PARENTAL CONTROL QUICK TOGGLES ---
     async function initParentalControls(container) {
         if (!NDNS_API_KEY) return;
@@ -6310,7 +6735,10 @@ function addGlobalStyle(css) {
         container.innerHTML = '<div style="font-size:11px;color:var(--panel-text-secondary);">Loading parental controls...</div>';
 
         try {
-            const config = await makeApiRequest('GET', `/profiles/${pid}/parentalControl`, null, NDNS_API_KEY);
+            const [config, deviceOptions] = await Promise.all([
+                makeApiRequest('GET', `/profiles/${pid}/parentalControl`, null, NDNS_API_KEY),
+                fetchParentalDeviceOptions(pid)
+            ]);
             container.innerHTML = '';
 
             // Services/categories toggles
@@ -6409,6 +6837,8 @@ function addGlobalStyle(css) {
             weeklyWrap.append(weeklyHeader, grid, weeklyStatus);
             container.appendChild(weeklyWrap);
             updateParentalWeeklyStatusElement();
+
+            container.appendChild(buildParentalDeviceOverrideManager(pid, deviceOptions));
 
             categories.forEach(cat => {
                 const isActive = config[cat.key] || (config.services && config.services.some(s => s.id === cat.key && s.active));
@@ -6816,7 +7246,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.21',
+            source: 'NDNS v3.4.22',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7642,7 +8072,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.21';
+        footer.textContent = 'NDNS v3.4.22';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -8478,6 +8908,7 @@ function addGlobalStyle(css) {
             initScheduledLogs();
             initHageziAutoSync();
             initParentalWeeklySchedule();
+            initParentalDeviceOverrides();
         }
     }
 
