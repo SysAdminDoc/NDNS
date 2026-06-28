@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.33
+// @version      3.4.34
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -157,6 +157,8 @@ function addGlobalStyle(css) {
     const API_RETRY_BASE_DELAY_MS = 600;
     const API_RETRY_MAX_DELAY_MS = 10000;
     const NON_RETRYABLE_WRITE_METHODS = new Set(['POST']);
+    const THEME_STUDIO_MAX_CSS_BYTES = 20 * 1024;
+    const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
 
     // --- GLOBAL STATE ---
     let panel, lockButton, settingsModal, togglePosButton, settingsButton;
@@ -5165,6 +5167,27 @@ function addGlobalStyle(css) {
         document.documentElement.setAttribute('data-ndns-density', densityMode);
     }
 
+    function getTextByteSize(text) {
+        return new Blob([String(text || '')]).size;
+    }
+
+    function validateThemeStudioCss(css) {
+        const size = getTextByteSize(css);
+        if (size > THEME_STUDIO_MAX_CSS_BYTES) {
+            return {
+                ok: false,
+                size,
+                message: `Custom CSS is ${size.toLocaleString()} bytes; max is ${THEME_STUDIO_MAX_CSS_BYTES.toLocaleString()} bytes.`
+            };
+        }
+        return { ok: true, size, message: '' };
+    }
+
+    function isThemeStudioBypassRequested() {
+        const params = new URLSearchParams(location.search);
+        return THEME_STUDIO_BYPASS_PARAMS.some(param => params.has(param)) || location.hash.includes('ndns-disable-custom-css');
+    }
+
     function applyThemeStudioCss(css = themeStudioCss) {
         if (themeStudioStyleElement) {
             themeStudioStyleElement.remove();
@@ -5173,11 +5196,45 @@ function addGlobalStyle(css) {
 
         themeStudioCss = String(css || '');
         if (!themeStudioCss.trim()) return;
+        const validation = validateThemeStudioCss(themeStudioCss);
+        if (!validation.ok) {
+            console.warn('[NDNS] Theme Studio CSS skipped:', validation.message);
+            showToast(`Theme Studio CSS skipped: ${validation.message}`, true, 7000);
+            return;
+        }
 
         themeStudioStyleElement = document.createElement('style');
         themeStudioStyleElement.id = 'ndns-theme-studio-css';
         themeStudioStyleElement.textContent = themeStudioCss;
         document.head.appendChild(themeStudioStyleElement);
+    }
+
+    async function resetThemeStudioCssForBypass() {
+        if (!isThemeStudioBypassRequested()) return false;
+        themeStudioCss = '';
+        await storage.set({ [KEY_THEME_STUDIO_CSS]: '' });
+        setTimeout(() => showToast('Theme Studio CSS reset by NDNS safe-mode URL.', false, 7000), 600);
+        return true;
+    }
+
+    function unwrapProfileImportPayload(payload) {
+        if (payload?.backupType === 'nextdns-profile-pre-import' && payload.profile && typeof payload.profile === 'object') {
+            return payload.profile;
+        }
+        return payload;
+    }
+
+    function downloadProfilePreImportBackup(profileId, profileConfig) {
+        const exportedAt = new Date().toISOString();
+        const payload = {
+            app: 'NDNS',
+            backupType: 'nextdns-profile-pre-import',
+            profileId,
+            exportedAt,
+            rollback: 'Open NDNS settings, choose Import Profile, paste this file, preview, then apply.',
+            profile: profileConfig
+        };
+        downloadFile(JSON.stringify(payload, null, 2), `NextDNS-Profile-${profileId}-PreImport-${exportedAt.replace(/[:.]/g, '-')}.json`, 'application/json');
     }
 
     function buildThemeStudioControls() {
@@ -5199,14 +5256,22 @@ function addGlobalStyle(css) {
 
         const status = document.createElement('div');
         status.className = 'ndns-theme-studio-status';
-        status.textContent = themeStudioCss.trim() ? 'Saved CSS loaded.' : 'No custom theme CSS saved.';
+        status.textContent = themeStudioCss.trim()
+            ? `Saved CSS loaded. Max ${THEME_STUDIO_MAX_CSS_BYTES.toLocaleString()} bytes; safe-mode reset: add ?ndns-safe-mode=1 to the URL.`
+            : `No custom theme CSS saved. Max ${THEME_STUDIO_MAX_CSS_BYTES.toLocaleString()} bytes.`;
 
         let previewTimer = null;
         textarea.oninput = () => {
             clearTimeout(previewTimer);
             previewTimer = setTimeout(() => {
+                const validation = validateThemeStudioCss(textarea.value);
+                if (!validation.ok) {
+                    status.textContent = validation.message;
+                    showToast(validation.message, true, 5000);
+                    return;
+                }
                 applyThemeStudioCss(textarea.value);
-                status.textContent = 'Previewing unsaved CSS.';
+                status.textContent = `Previewing unsaved CSS (${validation.size.toLocaleString()} bytes).`;
             }, 150);
         };
 
@@ -5215,9 +5280,15 @@ function addGlobalStyle(css) {
         saveBtn.className = 'ndns-panel-button ndns-btn-sm';
         saveBtn.textContent = 'Save';
         saveBtn.onclick = async () => {
+            const validation = validateThemeStudioCss(textarea.value);
+            if (!validation.ok) {
+                status.textContent = validation.message;
+                showToast(validation.message, true, 5000);
+                return;
+            }
             applyThemeStudioCss(textarea.value);
             await storage.set({ [KEY_THEME_STUDIO_CSS]: themeStudioCss });
-            status.textContent = 'Saved.';
+            status.textContent = `Saved (${validation.size.toLocaleString()} bytes). Safe-mode reset: add ?ndns-safe-mode=1 to the URL.`;
             showToast('Theme Studio CSS saved.');
         };
 
@@ -5252,10 +5323,17 @@ function addGlobalStyle(css) {
                     const parsed = JSON.parse(text);
                     if (typeof parsed.css === 'string') css = parsed.css;
                 } catch {}
+                const validation = validateThemeStudioCss(css);
+                if (!validation.ok) {
+                    status.textContent = validation.message;
+                    showToast(validation.message, true, 5000);
+                    importInput.value = '';
+                    return;
+                }
                 textarea.value = css;
                 applyThemeStudioCss(css);
                 await storage.set({ [KEY_THEME_STUDIO_CSS]: themeStudioCss });
-                status.textContent = 'Imported and saved.';
+                status.textContent = `Imported and saved (${validation.size.toLocaleString()} bytes).`;
                 showToast('Theme Studio CSS imported.');
                 importInput.value = '';
             };
@@ -5392,6 +5470,11 @@ function addGlobalStyle(css) {
         diffSummary.className = 'ndns-diff-summary';
         diffSummary.style.display = 'none';
 
+        const rollbackNotice = document.createElement('div');
+        rollbackNotice.className = 'ndns-diff-summary';
+        rollbackNotice.style.display = 'none';
+        rollbackNotice.textContent = 'A timestamped pre-import backup will download before changes are applied. Use that file in this importer to roll back.';
+
         const actions = document.createElement('div');
         actions.className = 'modal-actions';
 
@@ -5412,12 +5495,13 @@ function addGlobalStyle(css) {
 
         let parsedImport = null;
         let currentConfig = null;
+        let destructiveSections = [];
 
         previewBtn.onclick = async () => {
             const txt = textarea.value.trim();
             if (!txt) return showToast('Paste JSON first.', true);
             try {
-                parsedImport = JSON.parse(txt);
+                parsedImport = unwrapProfileImportPayload(JSON.parse(txt));
             } catch { return showToast('Invalid JSON.', true); }
 
             previewBtn.textContent = 'Loading current...';
@@ -5433,6 +5517,7 @@ function addGlobalStyle(css) {
             // Build diff
             diffContainer.innerHTML = '';
             let addCount = 0, removeCount = 0, unchangedCount = 0;
+            const destructive = new Set();
             const sections = ['denylist', 'allowlist', 'security', 'privacy', 'parentalControl', 'settings', 'rewrites'];
 
             sections.forEach(section => {
@@ -5470,6 +5555,7 @@ function addGlobalStyle(css) {
                             line.className = 'ndns-diff-remove';
                             line.textContent = `- ${id}`;
                             removeCount++;
+                            destructive.add(section);
                             diffContainer.appendChild(line);
                         }
                     });
@@ -5481,6 +5567,7 @@ function addGlobalStyle(css) {
                         line.className = 'ndns-diff-add';
                         line.textContent = `~ Changed`;
                         addCount++;
+                        if (current !== undefined && current !== null) destructive.add(section);
                         diffContainer.appendChild(line);
                     } else {
                         const line = document.createElement('div');
@@ -5492,9 +5579,12 @@ function addGlobalStyle(css) {
                 }
             });
 
-            diffSummary.textContent = `+${addCount} additions, -${removeCount} removals, ${unchangedCount} unchanged`;
+            destructiveSections = [...destructive];
+            const destructiveText = destructiveSections.length ? ` Destructive sections: ${destructiveSections.join(', ')}.` : '';
+            diffSummary.textContent = `+${addCount} additions, -${removeCount} removals, ${unchangedCount} unchanged.${destructiveText}`;
             diffSummary.style.display = '';
             diffContainer.style.display = '';
+            rollbackNotice.style.display = '';
             applyBtn.disabled = false;
             applyBtn.style.opacity = '1';
             previewBtn.textContent = 'Preview Changes';
@@ -5507,12 +5597,18 @@ function addGlobalStyle(css) {
             applyBtn.disabled = true;
 
             try {
+                const backupConfig = currentConfig || await makeApiRequest('GET', `/profiles/${pid}`, null, NDNS_API_KEY);
+                downloadProfilePreImportBackup(pid, backupConfig);
+                rollbackNotice.textContent = `Pre-import backup downloaded. Destructive sections: ${destructiveSections.length ? destructiveSections.join(', ') : 'none detected'}.`;
+                rollbackNotice.style.display = '';
                 // Apply each section via PATCH
                 await makeApiRequest('PATCH', `/profiles/${pid}`, parsedImport, NDNS_API_KEY);
-                showToast('Profile imported successfully! Reloading...');
+                showToast('Profile imported successfully. Pre-import backup downloaded for rollback. Reloading...');
                 overlay.remove();
                 setTimeout(() => location.reload(), 1500);
             } catch (e) {
+                rollbackNotice.textContent = `Import PATCH failed: ${e.message || e}. Roll back by importing the downloaded pre-import backup file. Trying section fallback now.`;
+                rollbackNotice.style.display = '';
                 // Fallback: apply sections individually
                 const sections = ['denylist', 'allowlist', 'rewrites'];
                 let applied = 0;
@@ -5526,14 +5622,14 @@ function addGlobalStyle(css) {
                         } catch {}
                     }
                 }
-                showToast(`Applied ${applied} items. Some sections may need manual config.`);
+                showToast(`Applied ${applied} items after PATCH failure. Use the downloaded pre-import backup to roll back if needed.`, applied === 0, 7000);
                 overlay.remove();
                 setTimeout(() => location.reload(), 1500);
             }
         };
 
         actions.append(previewBtn, applyBtn, cancelBtn);
-        modal.append(label, textarea, diffSummary, diffContainer, actions);
+        modal.append(label, textarea, diffSummary, rollbackNotice, diffContainer, actions);
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
     }
@@ -8413,7 +8509,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.33',
+            source: 'NDNS v3.4.34',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9406,7 +9502,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.33';
+        footer.textContent = 'NDNS v3.4.34';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -10116,6 +10212,7 @@ function addGlobalStyle(css) {
         applyTheme(currentTheme);
         applyDensityMode(densityMode);
         applyUltraCondensedMode(isUltraCondensed);
+        await resetThemeStudioCssForBypass();
         applyThemeStudioCss(themeStudioCss);
         applyListPageTheme();
         setupEscapeHandler();
