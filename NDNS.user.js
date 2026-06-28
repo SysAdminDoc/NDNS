@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.36
+// @version      3.4.37
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -163,6 +163,22 @@ function addGlobalStyle(css) {
     const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
     const OFFLINE_LOG_CACHE_DB_NAME = `${KEY_PREFIX}offline_logs_v1`;
     const OFFLINE_LOG_CACHE_TTL_DAYS = [1, 7, 14, 30];
+    const UI_STRINGS = Object.freeze({
+        analyticsDashboard: 'Analytics Dashboard',
+        cancel: 'Cancel',
+        clear: 'Clear',
+        export: 'Export',
+        exportCsv: 'Export CSV',
+        exportJson: 'Export JSON',
+        exportPdf: 'Export PDF',
+        exportProfile: 'Export Profile',
+        import: 'Import',
+        importProfile: 'Import Profile',
+        refresh: 'Refresh',
+        save: 'Save',
+        settings: '\u2699\ufe0f Settings',
+        themeStudio: 'Theme Studio'
+    });
 
     // --- GLOBAL STATE ---
     let panel, lockButton, settingsModal, togglePosButton, settingsButton;
@@ -2594,6 +2610,10 @@ function addGlobalStyle(css) {
     }
 
     const trustedHtmlPolicy = createTrustedHtmlPolicy();
+
+    function uiText(key) {
+        return UI_STRINGS[key] || key;
+    }
 
     function setStaticHtml(element, html) {
         element.innerHTML = trustedHtmlPolicy ? trustedHtmlPolicy.createHTML(html) : html;
@@ -5294,7 +5314,7 @@ function addGlobalStyle(css) {
 
         const header = document.createElement('div');
         header.className = 'settings-control-row';
-        header.innerHTML = '<span>Theme Studio</span>';
+        header.appendChild(createSafeElement('span', { text: uiText('themeStudio') }));
         wrap.appendChild(header);
 
         const textarea = document.createElement('textarea');
@@ -5329,7 +5349,7 @@ function addGlobalStyle(css) {
         const saveBtn = document.createElement('button');
         saveBtn.type = 'button';
         saveBtn.className = 'ndns-panel-button ndns-btn-sm';
-        saveBtn.textContent = 'Save';
+        saveBtn.textContent = uiText('save');
         saveBtn.onclick = async () => {
             const validation = validateThemeStudioCss(textarea.value);
             if (!validation.ok) {
@@ -5346,7 +5366,7 @@ function addGlobalStyle(css) {
         const exportBtn = document.createElement('button');
         exportBtn.type = 'button';
         exportBtn.className = 'ndns-panel-button ndns-btn-sm';
-        exportBtn.textContent = 'Export';
+        exportBtn.textContent = uiText('export');
         exportBtn.onclick = () => {
             const version = typeof GM_info !== 'undefined' ? (GM_info.script?.version || 'unknown') : 'unknown';
             const payload = {
@@ -5395,13 +5415,13 @@ function addGlobalStyle(css) {
         const importBtn = document.createElement('button');
         importBtn.type = 'button';
         importBtn.className = 'ndns-panel-button ndns-btn-sm';
-        importBtn.textContent = 'Import';
+        importBtn.textContent = uiText('import');
         importBtn.onclick = () => importInput.click();
 
         const clearBtn = document.createElement('button');
         clearBtn.type = 'button';
         clearBtn.className = 'ndns-panel-button ndns-btn-sm danger';
-        clearBtn.textContent = 'Clear';
+        clearBtn.textContent = uiText('clear');
         clearBtn.onclick = async () => {
             textarea.value = '';
             applyThemeStudioCss('');
@@ -5490,7 +5510,7 @@ function addGlobalStyle(css) {
             showToast(`Export failed: ${error.message}`, true);
         } finally {
             exportButton.disabled = false;
-            exportButton.textContent = 'Export Profile';
+            exportButton.textContent = uiText('exportProfile');
         }
     }
 
@@ -5541,7 +5561,7 @@ function addGlobalStyle(css) {
 
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'ndns-panel-button danger';
-        cancelBtn.textContent = 'Cancel';
+        cancelBtn.textContent = uiText('cancel');
         cancelBtn.onclick = () => overlay.remove();
 
         let parsedImport = null;
@@ -5706,7 +5726,7 @@ function addGlobalStyle(css) {
 
         const cancelBtn = document.createElement('button');
         cancelBtn.className = 'ndns-panel-button danger';
-        cancelBtn.textContent = 'Cancel';
+            cancelBtn.textContent = uiText('cancel');
         cancelBtn.style.marginTop = '12px';
         cancelBtn.onclick = () => overlay.remove();
         modal.appendChild(cancelBtn);
@@ -5764,7 +5784,7 @@ function addGlobalStyle(css) {
 
             const cancelBtn2 = document.createElement('button');
             cancelBtn2.className = 'ndns-panel-button danger';
-            cancelBtn2.textContent = 'Cancel';
+            cancelBtn2.textContent = uiText('cancel');
             cancelBtn2.onclick = () => overlay.remove();
 
             cloneBtn.onclick = async () => {
@@ -5811,7 +5831,7 @@ function addGlobalStyle(css) {
 
         const refreshBtn = document.createElement('button');
         refreshBtn.className = 'ndns-panel-button ndns-btn-sm';
-        refreshBtn.textContent = 'Refresh';
+        refreshBtn.textContent = uiText('refresh');
         refreshBtn.style.cssText = 'padding: 2px 8px; font-size: 10px; width: auto;';
         refreshBtn.onclick = () => initRewritePanel(container);
         header.appendChild(refreshBtn);
@@ -6350,7 +6370,7 @@ function addGlobalStyle(css) {
         header.className = 'ndns-analytics-header';
 
         const h2 = document.createElement('h2');
-        h2.textContent = 'Analytics Dashboard';
+        h2.textContent = uiText('analyticsDashboard');
         header.appendChild(h2);
 
         const controls = document.createElement('div');
@@ -6391,7 +6411,7 @@ function addGlobalStyle(css) {
         controls.appendChild(scopeSelect);
 
         const refreshBtn = document.createElement('button');
-        refreshBtn.textContent = 'Refresh';
+        refreshBtn.textContent = uiText('refresh');
         refreshBtn.onclick = () => {
             analyticsCache = null;
             container.innerHTML = '';
@@ -6400,17 +6420,17 @@ function addGlobalStyle(css) {
         controls.appendChild(refreshBtn);
 
         const csvBtn = document.createElement('button');
-        csvBtn.textContent = 'Export CSV';
+        csvBtn.textContent = uiText('exportCsv');
         csvBtn.onclick = () => exportAnalyticsCSV(pid);
         controls.appendChild(csvBtn);
 
         const jsonBtn = document.createElement('button');
-        jsonBtn.textContent = 'Export JSON';
+        jsonBtn.textContent = uiText('exportJson');
         jsonBtn.onclick = () => exportAnalyticsJSON(pid);
         controls.appendChild(jsonBtn);
 
         const pdfBtn = document.createElement('button');
-        pdfBtn.textContent = 'Export PDF';
+        pdfBtn.textContent = uiText('exportPdf');
         pdfBtn.onclick = () => exportAnalyticsPDF(pid);
         controls.appendChild(pdfBtn);
 
@@ -8560,7 +8580,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.36',
+            source: 'NDNS v3.4.37',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8829,7 +8849,7 @@ function addGlobalStyle(css) {
         const header = document.createElement('div');
         header.className = 'ndns-settings-modal-header';
         header.innerHTML = `
-            <h3>⚙️ Settings</h3>
+            <h3>${uiText('settings')}</h3>
             <a href="https://github.com/SysAdminDoc" target="_blank" class="github-link">${icons.github.outerHTML} <span>Open Source on GitHub</span></a>
         `;
         content.appendChild(header);
@@ -9132,7 +9152,7 @@ function addGlobalStyle(css) {
 
         const exportProfileBtn = document.createElement('button');
         exportProfileBtn.id = 'ndns-export-profile-btn';
-        exportProfileBtn.textContent = 'Export Profile';
+        exportProfileBtn.textContent = uiText('exportProfile');
         exportProfileBtn.className = 'ndns-panel-button';
         exportProfileBtn.onclick = exportProfile;
 
@@ -9300,7 +9320,7 @@ function addGlobalStyle(css) {
 
         // Profile Import button
         const importProfileBtn = document.createElement('button');
-        importProfileBtn.textContent = 'Import Profile';
+        importProfileBtn.textContent = uiText('importProfile');
         importProfileBtn.className = 'ndns-panel-button';
         importProfileBtn.onclick = () => { overlay.style.display = 'none'; importProfile(); };
 
@@ -9622,7 +9642,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.36';
+        footer.textContent = 'NDNS v3.4.37';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
