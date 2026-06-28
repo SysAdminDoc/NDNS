@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.29
+// @version      3.4.30
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2224,6 +2224,37 @@ function addGlobalStyle(css) {
         return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
+    function createTrustedHtmlPolicy() {
+        if (typeof trustedTypes === 'undefined' || !trustedTypes.createPolicy) return null;
+        try {
+            return trustedTypes.createPolicy('ndns-static-html', { createHTML: (html) => html });
+        } catch {
+            return null;
+        }
+    }
+
+    const trustedHtmlPolicy = createTrustedHtmlPolicy();
+
+    function setStaticHtml(element, html) {
+        element.innerHTML = trustedHtmlPolicy ? trustedHtmlPolicy.createHTML(html) : html;
+    }
+
+    function createSafeElement(tag, options = {}, children = []) {
+        const element = document.createElement(tag);
+        if (options.className) element.className = options.className;
+        if (options.style) element.style.cssText = options.style;
+        if (options.title !== undefined) element.title = String(options.title);
+        if (options.text !== undefined) element.textContent = String(options.text);
+        Object.entries(options.attrs || {}).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) element.setAttribute(key, String(value));
+        });
+        children.flat().forEach((child) => {
+            if (child === undefined || child === null) return;
+            element.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        });
+        return element;
+    }
+
     function getDomainTag(domain) {
         const key = normalizeImportedDomain(domain);
         if (!key || !domainTags) return '';
@@ -2766,27 +2797,52 @@ function addGlobalStyle(css) {
 
         const overlay = document.createElement('div');
         overlay.id = 'ndns-onboarding-overlay';
-
-        let modalHTML = `
-            <h3>🔑 API Key Required</h3>
-            <p>Let's grab your API key from your NextDNS account page to unlock full features.</p>
-            <button id="ndns-get-api-key-btn" class="ndns-flashy-button">Take me there!</button>
-        `;
+        const modal = document.createElement('div');
+        modal.id = 'ndns-onboarding-modal';
 
         if (options.manual) {
-            const profileId = getCurrentProfileId();
-            modalHTML = `
-                <h3>📋 Manual API Key Entry</h3>
-                <p>Your API Key has been copied. Paste it below:</p>
-                <div class="api-input-wrapper">
-                    <input type="text" id="ndns-manual-api-input" placeholder="Paste API Key here...">
-                </div>
-                <button id="ndns-manual-api-submit" class="ndns-flashy-button">Accept API Key</button>
-                <a href="https://my.nextdns.io/${profileId}/api" target="_blank" style="display: block; font-size: 11px; color: #b0b0b0; margin-top: 12px; text-decoration: underline;">Didn't copy the key? Click here to return to the API page.</a>
-            `;
+            const profileId = encodeURIComponent(String(getCurrentProfileId() || ''));
+            const inputWrapper = createSafeElement('div', { className: 'api-input-wrapper' }, [
+                createSafeElement('input', {
+                    attrs: {
+                        type: 'text',
+                        id: 'ndns-manual-api-input',
+                        placeholder: 'Paste API Key here...'
+                    }
+                })
+            ]);
+            modal.append(
+                createSafeElement('h3', { text: 'Manual API Key Entry' }),
+                createSafeElement('p', { text: 'Your API Key has been copied. Paste it below:' }),
+                inputWrapper,
+                createSafeElement('button', {
+                    className: 'ndns-flashy-button',
+                    text: 'Accept API Key',
+                    attrs: { id: 'ndns-manual-api-submit' }
+                }),
+                createSafeElement('a', {
+                    text: "Didn't copy the key? Click here to return to the API page.",
+                    style: 'display: block; font-size: 11px; color: #b0b0b0; margin-top: 12px; text-decoration: underline;',
+                    attrs: {
+                        href: `https://my.nextdns.io/${profileId}/api`,
+                        target: '_blank',
+                        rel: 'noopener noreferrer'
+                    }
+                })
+            );
+        } else {
+            modal.append(
+                createSafeElement('h3', { text: 'API Key Required' }),
+                createSafeElement('p', { text: "Let's grab your API key from your NextDNS account page to unlock full features." }),
+                createSafeElement('button', {
+                    className: 'ndns-flashy-button',
+                    text: 'Take me there!',
+                    attrs: { id: 'ndns-get-api-key-btn' }
+                })
+            );
         }
 
-        overlay.innerHTML = `<div id="ndns-onboarding-modal">${modalHTML}</div>`;
+        overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
         if (options.manual) {
@@ -2829,7 +2885,7 @@ function addGlobalStyle(css) {
 
         const closeBtn = document.createElement('span');
         closeBtn.className = 'ndns-spotlight-close';
-        closeBtn.innerHTML = '&times;';
+        closeBtn.textContent = '\u00d7';
         closeBtn.onclick = () => {
             overlay.remove();
             pitch.remove();
@@ -2895,7 +2951,14 @@ function addGlobalStyle(css) {
                 helper.style.transition = 'opacity 0.5s';
                 helper.style.opacity = '0.5';
                 helper.style.pointerEvents = 'none';
-                message.innerHTML = `<b>Couldn't create an API key.</b><br>You'll need to upgrade to <b>NextDNS Pro</b> to use this feature.`;
+                message.textContent = '';
+                message.append(
+                    createSafeElement('b', { text: "Couldn't create an API key." }),
+                    document.createElement('br'),
+                    'You\'ll need to upgrade to ',
+                    createSafeElement('b', { text: 'NextDNS Pro' }),
+                    ' to use this feature.'
+                );
                 actionButton.textContent = 'Upgrade to Pro';
                 actionButton.className = 'save-key-btn';
                 actionButton.onclick = () => window.open('https://nextdns.io/?from=6mrqtjw2', '_blank');
@@ -2907,7 +2970,8 @@ function addGlobalStyle(css) {
             }
         };
 
-        helper.innerHTML = `<p>⏳ Looking for the API section...</p>`;
+        helper.textContent = '';
+        helper.appendChild(createSafeElement('p', { text: 'Looking for the API section...' }));
         window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 
         setTimeout(() => {
@@ -5194,12 +5258,20 @@ function addGlobalStyle(css) {
             const rewrites = result.data || result || [];
 
             if (rewrites.length === 0) {
-                list.innerHTML = '<div style="font-size: 11px; color: var(--panel-text-secondary); text-align: center; padding: 8px;">No rewrites configured</div>';
+                list.textContent = '';
+                list.appendChild(createSafeElement('div', {
+                    text: 'No rewrites configured',
+                    style: 'font-size: 11px; color: var(--panel-text-secondary); text-align: center; padding: 8px;'
+                }));
             } else {
                 rewrites.forEach(rw => {
                     const item = document.createElement('div');
                     item.className = 'ndns-rewrite-item';
-                    item.innerHTML = `<span><span class="domain">${escapeHtml(rw.name || '')}</span> <span class="answer">${escapeHtml(rw.content || rw.answer || '')}</span></span>`;
+                    const summary = createSafeElement('span', {}, [
+                        createSafeElement('span', { className: 'domain', text: rw.name || '' }),
+                        ' ',
+                        createSafeElement('span', { className: 'answer', text: rw.content || rw.answer || '' })
+                    ]);
                     const delBtn = document.createElement('button');
                     delBtn.className = 'delete-btn';
                     delBtn.textContent = 'x';
@@ -5210,12 +5282,16 @@ function addGlobalStyle(css) {
                             showToast(`Rewrite ${rw.name} removed.`);
                         } catch (e) { showToast(`Error: ${e.message}`, true); }
                     };
-                    item.appendChild(delBtn);
+                    item.append(summary, delBtn);
                     list.appendChild(item);
                 });
             }
         } catch (e) {
-            list.innerHTML = `<div style="font-size: 11px; color: var(--danger-color);">Failed to load: ${e.message}</div>`;
+            list.textContent = '';
+            list.appendChild(createSafeElement('div', {
+                text: `Failed to load: ${e.message}`,
+                style: 'font-size: 11px; color: var(--danger-color);'
+            }));
         }
 
         // Add new rewrite form
@@ -5784,7 +5860,11 @@ function addGlobalStyle(css) {
             buildDashboardContent(container, analyticsCache);
 
         } catch (e) {
-            loading.innerHTML = `<span style="color:var(--danger-color);">Failed to load analytics: ${escapeHtml(String(e?.message || e || 'Unknown error'))}</span>`;
+            loading.textContent = '';
+            loading.appendChild(createSafeElement('span', {
+                text: `Failed to load analytics: ${String(e?.message || e || 'Unknown error')}`,
+                style: 'color:var(--danger-color);'
+            }));
         }
     }
 
@@ -5826,7 +5906,11 @@ function addGlobalStyle(css) {
         cardData.forEach(c => {
             const card = document.createElement('div');
             card.className = 'ndns-stat-card';
-            card.innerHTML = `<div class="card-value ${c.cls}">${c.value}</div><div class="card-label">${c.label}</div>${c.sub ? `<div class="card-sub">${c.sub}</div>` : ''}`;
+            card.append(
+                createSafeElement('div', { className: `card-value ${c.cls}`.trim(), text: c.value }),
+                createSafeElement('div', { className: 'card-label', text: c.label })
+            );
+            if (c.sub) card.appendChild(createSafeElement('div', { className: 'card-sub', text: c.sub }));
             cards.appendChild(card);
         });
         container.appendChild(cards);
@@ -5919,12 +6003,12 @@ function addGlobalStyle(css) {
             row.className = 'ndns-anomaly-row';
             const previousLabel = spike.previous > 0 ? spike.previous.toLocaleString() : '0';
             const ratioLabel = Number.isFinite(spike.ratio) ? `${spike.ratio.toFixed(1)}x` : 'new';
-            row.innerHTML = `
-                <div class="ndns-anomaly-name" title="${escapeAttr(spike.category)}">${escapeHtml(spike.category)}</div>
-                <div class="ndns-anomaly-stat">now ${spike.current.toLocaleString()}</div>
-                <div class="ndns-anomaly-stat">prev ${previousLabel}</div>
-                <div class="ndns-anomaly-badge">${ratioLabel}</div>
-            `;
+            row.append(
+                createSafeElement('div', { className: 'ndns-anomaly-name', text: spike.category, title: spike.category }),
+                createSafeElement('div', { className: 'ndns-anomaly-stat', text: `now ${spike.current.toLocaleString()}` }),
+                createSafeElement('div', { className: 'ndns-anomaly-stat', text: `prev ${previousLabel}` }),
+                createSafeElement('div', { className: 'ndns-anomaly-badge', text: ratioLabel })
+            );
             list.appendChild(row);
         });
         widget.appendChild(list);
@@ -5940,12 +6024,33 @@ function addGlobalStyle(css) {
 
         const table = document.createElement('table');
         table.className = 'ndns-data-table';
-        table.innerHTML = '<thead><tr><th>Profile</th><th class="right">Queries</th><th class="right">Blocked</th><th class="right">Blocked %</th></tr></thead>';
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        headerRow.append(
+            createSafeElement('th', { text: 'Profile' }),
+            createSafeElement('th', { className: 'right', text: 'Queries' }),
+            createSafeElement('th', { className: 'right', text: 'Blocked' }),
+            createSafeElement('th', { className: 'right', text: 'Blocked %' })
+        );
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
         const tbody = document.createElement('tbody');
         (profiles || []).forEach((profile) => {
             const tr = document.createElement('tr');
             const pct = profile.total > 0 ? (profile.blocked / profile.total * 100).toFixed(1) : '0.0';
-            tr.innerHTML = `<td>${escapeHtml(profile.name)} <span style="color:var(--panel-text-secondary);font-family:monospace;">${escapeHtml(profile.id)}</span></td><td class="right mono">${profile.total.toLocaleString()}</td><td class="right mono">${profile.blocked.toLocaleString()}</td><td class="right mono">${pct}%</td>`;
+            tr.append(
+                createSafeElement('td', {}, [
+                    String(profile.name || ''),
+                    ' ',
+                    createSafeElement('span', {
+                        text: profile.id || '',
+                        style: 'color:var(--panel-text-secondary);font-family:monospace;'
+                    })
+                ]),
+                createSafeElement('td', { className: 'right mono', text: profile.total.toLocaleString() }),
+                createSafeElement('td', { className: 'right mono', text: profile.blocked.toLocaleString() }),
+                createSafeElement('td', { className: 'right mono', text: `${pct}%` })
+            );
             tbody.appendChild(tr);
         });
         table.appendChild(tbody);
@@ -6055,13 +6160,23 @@ function addGlobalStyle(css) {
 
             const header = document.createElement('div');
             header.className = 'ndns-device-head';
-            header.innerHTML = `
-                <div>
-                    <div class="ndns-device-name" title="${escapeAttr(device.name)}">${escapeHtml(device.name)}</div>
-                    ${device.meta ? `<div class="ndns-device-meta" title="${escapeAttr(device.meta)}">${escapeHtml(device.meta)}</div>` : ''}
-                </div>
-                <div class="ndns-device-count">${device.queries.toLocaleString()}</div>
-            `;
+            const deviceInfo = document.createElement('div');
+            deviceInfo.appendChild(createSafeElement('div', {
+                className: 'ndns-device-name',
+                text: device.name,
+                title: device.name
+            }));
+            if (device.meta) {
+                deviceInfo.appendChild(createSafeElement('div', {
+                    className: 'ndns-device-meta',
+                    text: device.meta,
+                    title: device.meta
+                }));
+            }
+            header.append(
+                deviceInfo,
+                createSafeElement('div', { className: 'ndns-device-count', text: device.queries.toLocaleString() })
+            );
             card.appendChild(header);
 
             const maxAppQueries = Math.max(...device.apps.map(app => app.queries), 1);
@@ -6071,12 +6186,16 @@ function addGlobalStyle(css) {
                 const pct = Math.max(2, app.queries / maxAppQueries * 100);
                 const row = document.createElement('div');
                 row.className = 'ndns-app-row';
-                row.innerHTML = `
-                    <div class="ndns-app-name" title="${escapeAttr(app.name)}">${escapeHtml(app.name)}</div>
-                    <div class="ndns-app-track"><div class="ndns-app-fill" style="width:${pct.toFixed(1)}%"></div></div>
-                    <div class="ndns-app-count">${app.queries.toLocaleString()}</div>
-                    <div class="ndns-app-domains" title="${escapeAttr(app.domains.join(', '))}">${escapeHtml(app.domains.join(', '))}</div>
-                `;
+                const appTrack = createSafeElement('div', { className: 'ndns-app-track' }, [
+                    createSafeElement('div', { className: 'ndns-app-fill', style: `width:${pct.toFixed(1)}%` })
+                ]);
+                const domains = app.domains.join(', ');
+                row.append(
+                    createSafeElement('div', { className: 'ndns-app-name', text: app.name, title: app.name }),
+                    appTrack,
+                    createSafeElement('div', { className: 'ndns-app-count', text: app.queries.toLocaleString() }),
+                    createSafeElement('div', { className: 'ndns-app-domains', text: domains, title: domains })
+                );
                 appList.appendChild(row);
             });
             card.appendChild(appList);
@@ -6113,8 +6232,16 @@ function addGlobalStyle(css) {
             const pctOfTotal = total > 0 ? (item.value / total * 100).toFixed(1) : '0.0';
             const row = document.createElement('div');
             row.className = 'ndns-bar-row';
-            const eName = escapeHtml(item.name);
-            row.innerHTML = `<span class="ndns-bar-rank">${idx + 1}</span><span class="ndns-bar-label" title="${eName}">${eName}</span><div class="ndns-bar-track"><div class="ndns-bar-fill ${colorClass}" style="width:${pct}%"></div></div><span class="ndns-bar-count">${item.value.toLocaleString()}</span><span class="ndns-bar-pct">${pctOfTotal}%</span>`;
+            const track = createSafeElement('div', { className: 'ndns-bar-track' }, [
+                createSafeElement('div', { className: `ndns-bar-fill ${colorClass}`, style: `width:${pct}%` })
+            ]);
+            row.append(
+                createSafeElement('span', { className: 'ndns-bar-rank', text: idx + 1 }),
+                createSafeElement('span', { className: 'ndns-bar-label', text: item.name, title: item.name }),
+                track,
+                createSafeElement('span', { className: 'ndns-bar-count', text: item.value.toLocaleString() }),
+                createSafeElement('span', { className: 'ndns-bar-pct', text: `${pctOfTotal}%` })
+            );
             chart.appendChild(row);
         });
 
@@ -6203,7 +6330,12 @@ function addGlobalStyle(css) {
             const row = document.createElement('div');
             row.className = 'ndns-ring-legend-item';
             const pctStr = (item.value / total * 100).toFixed(1);
-            row.innerHTML = `<span class="ndns-ring-legend-dot" style="background:${colors[i % colors.length]}"></span><span>${escapeHtml(item.name)}</span><span class="ndns-ring-legend-value">${item.value.toLocaleString()}</span><span class="ndns-ring-legend-pct">${pctStr}%</span>`;
+            row.append(
+                createSafeElement('span', { className: 'ndns-ring-legend-dot', style: `background:${colors[i % colors.length]}` }),
+                createSafeElement('span', { text: item.name }),
+                createSafeElement('span', { className: 'ndns-ring-legend-value', text: item.value.toLocaleString() }),
+                createSafeElement('span', { className: 'ndns-ring-legend-pct', text: `${pctStr}%` })
+            );
             legend.appendChild(row);
         });
         ringContainer.appendChild(legend);
@@ -6231,21 +6363,35 @@ function addGlobalStyle(css) {
         const table = document.createElement('table');
         table.className = 'ndns-data-table';
         const thead = document.createElement('thead');
-        thead.innerHTML = '<tr><th>Status</th><th class="right">Queries</th><th class="right">Share</th></tr>';
+        const headRow = document.createElement('tr');
+        headRow.append(
+            createSafeElement('th', { text: 'Status' }),
+            createSafeElement('th', { className: 'right', text: 'Queries' }),
+            createSafeElement('th', { className: 'right', text: 'Share' })
+        );
+        thead.appendChild(headRow);
         table.appendChild(thead);
 
         const tbody = document.createElement('tbody');
         items.forEach(item => {
             const tr = document.createElement('tr');
             const pct = total > 0 ? (item.value / total * 100).toFixed(1) : '0.0';
-            tr.innerHTML = `<td>${escapeHtml(item.name)}</td><td class="right mono">${item.value.toLocaleString()}</td><td class="right mono">${pct}%</td>`;
+            tr.append(
+                createSafeElement('td', { text: item.name }),
+                createSafeElement('td', { className: 'right mono', text: item.value.toLocaleString() }),
+                createSafeElement('td', { className: 'right mono', text: `${pct}%` })
+            );
             tbody.appendChild(tr);
         });
 
         // Total row
         const totalRow = document.createElement('tr');
         totalRow.style.cssText = 'font-weight:700; border-top:2px solid var(--panel-border);';
-        totalRow.innerHTML = `<td>Total</td><td class="right mono">${total.toLocaleString()}</td><td class="right mono">100%</td>`;
+        totalRow.append(
+            createSafeElement('td', { text: 'Total' }),
+            createSafeElement('td', { className: 'right mono', text: total.toLocaleString() }),
+            createSafeElement('td', { className: 'right mono', text: '100%' })
+        );
         tbody.appendChild(totalRow);
 
         table.appendChild(tbody);
@@ -6953,10 +7099,13 @@ function addGlobalStyle(css) {
 
                 const info = document.createElement('div');
                 const actionText = rule.action === 'on' ? 'Recreation On' : 'Recreation Off';
-                info.innerHTML = `
-                    <div class="ndns-device-override-title">${escapeHtml(rule.deviceName)}</div>
-                    <div class="ndns-device-override-meta">${escapeHtml(formatDeviceOverrideDays(rule.days))} ${escapeHtml(rule.start)}-${escapeHtml(rule.end)} / ${escapeHtml(actionText)}</div>
-                `;
+                info.append(
+                    createSafeElement('div', { className: 'ndns-device-override-title', text: rule.deviceName }),
+                    createSafeElement('div', {
+                        className: 'ndns-device-override-meta',
+                        text: `${formatDeviceOverrideDays(rule.days)} ${rule.start}-${rule.end} / ${actionText}`
+                    })
+                );
 
                 const sw = document.createElement('div');
                 sw.className = `ndns-toggle-switch ${rule.enabled ? 'active' : ''}`;
@@ -7061,7 +7210,11 @@ function addGlobalStyle(css) {
         const pid = getCurrentProfileId();
         if (!pid) return;
 
-        container.innerHTML = '<div style="font-size:11px;color:var(--panel-text-secondary);">Loading parental controls...</div>';
+        container.textContent = '';
+        container.appendChild(createSafeElement('div', {
+            text: 'Loading parental controls...',
+            style: 'font-size:11px;color:var(--panel-text-secondary);'
+        }));
 
         try {
             const [config, deviceOptions] = await Promise.all([
@@ -7132,9 +7285,10 @@ function addGlobalStyle(css) {
             const recTimeToggle = document.createElement('div');
             recTimeToggle.className = 'ndns-parental-toggle';
             const recTimeEnabled = config.recreationTime?.enabled || false;
-            recTimeToggle.innerHTML = `
-                <div class="toggle-label"><span>⏰</span><span>Recreation Time</span></div>
-            `;
+            recTimeToggle.appendChild(createSafeElement('div', { className: 'toggle-label' }, [
+                createSafeElement('span', { text: '\u23f0' }),
+                createSafeElement('span', { text: 'Recreation Time' })
+            ]));
             const recToggle = document.createElement('div');
             recToggle.className = `ndns-toggle-switch ${recTimeEnabled ? 'active' : ''}`;
             recToggle.onclick = async () => {
@@ -7219,7 +7373,10 @@ function addGlobalStyle(css) {
                 const isActive = config[cat.key] || (config.services && config.services.some(s => s.id === cat.key && s.active));
                 const toggle = document.createElement('div');
                 toggle.className = 'ndns-parental-toggle';
-                toggle.innerHTML = `<div class="toggle-label"><span>${cat.icon}</span><span>${cat.label}</span></div>`;
+                toggle.appendChild(createSafeElement('div', { className: 'toggle-label' }, [
+                    createSafeElement('span', { text: cat.icon }),
+                    createSafeElement('span', { text: cat.label })
+                ]));
 
                 const sw = document.createElement('div');
                 sw.className = `ndns-toggle-switch ${isActive ? 'active' : ''}`;
@@ -7239,7 +7396,11 @@ function addGlobalStyle(css) {
             });
 
         } catch (e) {
-            container.innerHTML = `<div style="font-size:11px;color:var(--danger-color);">Failed: ${e.message}</div>`;
+            container.textContent = '';
+            container.appendChild(createSafeElement('div', {
+                text: `Failed: ${e.message}`,
+                style: 'font-size:11px;color:var(--danger-color);'
+            }));
         }
     }
 
@@ -7288,10 +7449,13 @@ function addGlobalStyle(css) {
         regexPatterns.forEach((pattern, idx) => {
             const item = document.createElement('div');
             item.className = 'ndns-regex-item';
-            item.innerHTML = `
-                <span class="pattern">${escapeHtml(pattern.pattern)}</span>
-                <div class="color-swatch" style="background:${escapeHtml(pattern.color || 'rgba(255,193,7,0.3)')}"></div>
-            `;
+            item.append(
+                createSafeElement('span', { className: 'pattern', text: pattern.pattern }),
+                createSafeElement('div', {
+                    className: 'color-swatch',
+                    style: `background:${pattern.color || 'rgba(255,193,7,0.3)'}`
+                })
+            );
             const delBtn = document.createElement('button');
             delBtn.className = 'delete-btn';
             delBtn.style.cssText = 'background:none;border:none;color:var(--danger-color);cursor:pointer;font-size:12px;padding:2px 4px;';
@@ -7692,7 +7856,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.29',
+            source: 'NDNS v3.4.30',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7855,7 +8019,10 @@ function addGlobalStyle(css) {
         webhookDomains.forEach((wd, idx) => {
             const item = document.createElement('div');
             item.className = 'ndns-webhook-domain-item';
-            item.innerHTML = `<span style="font-family:monospace;">${escapeHtml(wd)}</span>`;
+            item.appendChild(createSafeElement('span', {
+                text: wd,
+                style: 'font-family:monospace;'
+            }));
             const delBtn = document.createElement('button');
             delBtn.style.cssText = 'background:none;border:none;color:var(--danger-color);cursor:pointer;font-size:11px;';
             delBtn.textContent = 'x';
@@ -8111,7 +8278,7 @@ function addGlobalStyle(css) {
         toggleOptions.forEach(opt => {
             const row = document.createElement('div');
             row.className = 'settings-control-row';
-            row.innerHTML = `<span>${opt.label}</span>`;
+            row.appendChild(createSafeElement('span', { text: opt.label }));
 
             const toggle = document.createElement('div');
             toggle.className = `ndns-toggle-switch ${opt.get() ? 'active' : ''}`;
@@ -8312,7 +8479,7 @@ function addGlobalStyle(css) {
         advancedToggles.forEach(opt => {
             const row = document.createElement('div');
             row.className = 'settings-control-row';
-            row.innerHTML = `<span>${opt.label}</span>`;
+            row.appendChild(createSafeElement('span', { text: opt.label }));
             const toggle = document.createElement('div');
             toggle.className = `ndns-toggle-switch ${opt.get() ? 'active' : ''}`;
             toggle.onclick = async () => {
@@ -8611,7 +8778,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.29';
+        footer.textContent = 'NDNS v3.4.30';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
