@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.13
+// @version      3.4.14
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -68,6 +68,7 @@ function addGlobalStyle(css) {
     const KEY_HAGEZI_ADDED_ALLOWLIST = `${KEY_PREFIX}hagezi_added_allowlist_v1`;
     const KEY_HAGEZI_LIST_META = `${KEY_PREFIX}hagezi_list_meta_v1`;
     const KEY_HAGEZI_LIST_SNAPSHOTS = `${KEY_PREFIX}hagezi_list_snapshots_v1`;
+    const KEY_HAGEZI_AUTO_SYNC = `${KEY_PREFIX}hagezi_auto_sync_v1`;
     // NEW KEYS for v2.0
     const KEY_ULTRA_CONDENSED = `${KEY_PREFIX}ultra_condensed_v1`;
     const KEY_CUSTOM_CSS_ENABLED = `${KEY_PREFIX}custom_css_enabled_v1`;
@@ -93,6 +94,7 @@ function addGlobalStyle(css) {
     // --- HAGEZI CONFIG ---
     const HAGEZI_TLDS_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-aggressive.txt";
     const HAGEZI_ALLOWLIST_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-allow.txt";
+    const HAGEZI_AUTO_SYNC_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
     // --- GLOBAL STATE ---
     let panel, lockButton, settingsModal, togglePosButton, settingsButton;
@@ -111,6 +113,9 @@ function addGlobalStyle(css) {
     let listPageThemeStyleElement = null;
     let hageziListMeta = {};
     let hageziListSnapshots = {};
+    let hageziAutoSyncConfig = { enabled: false, lastRun: null };
+    let hageziAutoSyncTimer = null;
+    let hageziAutoSyncRunning = false;
     // NEW STATE for v2.0
     let isUltraCondensed = true;
     let customCssEnabled = true;
@@ -1843,6 +1848,7 @@ function addGlobalStyle(css) {
             [KEY_LIST_PAGE_THEME]: true,
             [KEY_HAGEZI_LIST_META]: {},
             [KEY_HAGEZI_LIST_SNAPSHOTS]: {},
+            [KEY_HAGEZI_AUTO_SYNC]: { enabled: false, lastRun: null },
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
             // NDNS features
@@ -1877,6 +1883,7 @@ function addGlobalStyle(css) {
         enableListPageTheme = values[KEY_LIST_PAGE_THEME];
         hageziListMeta = values[KEY_HAGEZI_LIST_META] || {};
         hageziListSnapshots = values[KEY_HAGEZI_LIST_SNAPSHOTS] || {};
+        hageziAutoSyncConfig = { enabled: false, lastRun: null, ...(values[KEY_HAGEZI_AUTO_SYNC] || {}) };
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
         // NDNS features
@@ -2219,6 +2226,17 @@ function addGlobalStyle(css) {
         return `Tracked upstream versions: ${rows.join(' | ')}`;
     }
 
+    function formatHageziAutoSyncStatus() {
+        return hageziAutoSyncConfig.lastRun
+            ? `Last auto-sync: ${new Date(hageziAutoSyncConfig.lastRun).toLocaleString()}`
+            : 'No auto-sync run yet.';
+    }
+
+    function updateHageziAutoSyncStatusElement() {
+        const status = document.getElementById('ndns-hagezi-auto-status');
+        if (status) status.textContent = formatHageziAutoSyncStatus();
+    }
+
     function renderHageziDiffColumn(title, items, overflow) {
         const column = document.createElement('div');
         column.style.cssText = 'min-width:0;';
@@ -2290,15 +2308,8 @@ function addGlobalStyle(css) {
         document.body.appendChild(overlay);
     }
 
-    async function manageHageziLists(action, listType, button) {
-        const profileId = getCurrentProfileId();
-        if (!profileId || !NDNS_API_KEY) return showToast("Profile ID or API Key missing.", true);
-
-        const originalText = button.textContent;
-        button.disabled = true;
-        button.textContent = 'Processing...';
-
-        const config = {
+    function getHageziConfig(profileId) {
+        return {
             tlds: {
                 url: HAGEZI_TLDS_URL,
                 parseType: 'tld',
@@ -2320,44 +2331,77 @@ function addGlobalStyle(css) {
                 name: 'Domain Allowlist'
             }
         };
+    }
+
+    async function applyHageziListUpdates(listType, currentConfig, onProgress = null) {
+        const remoteList = await fetchHageziList(currentConfig.url, currentConfig.parseType);
+        const remoteItems = [...remoteList];
+        const hageziDiff = await recordHageziListVersion(listType, remoteItems, currentConfig.name);
+        const apiResponse = await makeApiRequest('GET', currentConfig.getEndpoint);
+        const currentItems = new Set(
+            listType === 'tlds' ? apiResponse.data.tlds.map(t => t.id) : apiResponse.data.map(d => d.id)
+        );
+
+        const itemsToAdd = remoteItems.filter(item => !currentItems.has(item));
+        if (onProgress) onProgress({ stage: 'start', total: itemsToAdd.length });
+
+        for (let i = 0; i < itemsToAdd.length; i++) {
+            const item = itemsToAdd[i];
+            const body = listType === 'tlds' ? { id: item } : { id: item, active: true };
+            await makeApiRequest('POST', currentConfig.addEndpoint, body);
+            if (onProgress) onProgress({ stage: 'progress', completed: i + 1, total: itemsToAdd.length });
+            await sleep();
+        }
+
+        if (itemsToAdd.length > 0) {
+            const existingAdded = (await storage.get({ [currentConfig.storageKey]: [] }))[currentConfig.storageKey];
+            const newlyAdded = new Set([...existingAdded, ...itemsToAdd]);
+            await storage.set({ [currentConfig.storageKey]: [...newlyAdded] });
+            if (listType === 'allowlist') {
+                itemsToAdd.forEach((item) => {
+                    const domain = normalizeImportedDomain(item);
+                    if (domain && !domainTags[domain]) domainTags[domain] = 'hagezi';
+                });
+                await storage.set({ [KEY_DOMAIN_TAGS]: domainTags });
+            }
+        }
+
+        return {
+            listType,
+            listName: currentConfig.name,
+            diff: serializeHageziDiff(hageziDiff),
+            addedCount: itemsToAdd.length
+        };
+    }
+
+    async function manageHageziLists(action, listType, button) {
+        const profileId = getCurrentProfileId();
+        if (!profileId || !NDNS_API_KEY) return showToast("Profile ID or API Key missing.", true);
+
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Processing...';
+
+        const config = getHageziConfig(profileId);
 
         const currentConfig = config[listType];
 
         try {
             if (action === 'apply') {
-                const remoteList = await fetchHageziList(currentConfig.url, currentConfig.parseType);
-                const remoteItems = [...remoteList];
-                const hageziDiff = await recordHageziListVersion(listType, remoteItems, currentConfig.name);
-                sessionStorage.setItem('ndns_hagezi_diff', JSON.stringify(serializeHageziDiff(hageziDiff)));
-                const apiResponse = await makeApiRequest('GET', currentConfig.getEndpoint);
-                const currentItems = new Set(
-                    listType === 'tlds' ? apiResponse.data.tlds.map(t => t.id) : apiResponse.data.map(d => d.id)
-                );
+                let progressToast = null;
+                const result = await applyHageziListUpdates(listType, currentConfig, ({ stage, completed, total }) => {
+                    if (stage === 'start' && total > 0) {
+                        progressToast = showToast(`Adding ${total} entries to ${currentConfig.name}... 0%`, false, total * 600);
+                    } else if (stage === 'progress' && progressToast) {
+                        progressToast.textContent = `Adding to ${currentConfig.name}... ${Math.round(completed / total * 100)}%`;
+                    }
+                });
+                sessionStorage.setItem('ndns_hagezi_diff', JSON.stringify(result.diff));
 
-                const itemsToAdd = remoteItems.filter(item => !currentItems.has(item));
-
-                if (itemsToAdd.length === 0) {
+                if (result.addedCount === 0) {
                     showToast(`Your ${currentConfig.name} is already up to date.`, false);
                 } else {
-                    const toast = showToast(`Adding ${itemsToAdd.length} entries to ${currentConfig.name}... 0%`, false, itemsToAdd.length * 600);
-                    for (let i = 0; i < itemsToAdd.length; i++) {
-                        const item = itemsToAdd[i];
-                        const body = listType === 'tlds' ? { id: item } : { id: item, active: true };
-                        await makeApiRequest('POST', currentConfig.addEndpoint, body);
-                        toast.textContent = `Adding to ${currentConfig.name}... ${Math.round((i + 1) / itemsToAdd.length * 100)}%`;
-                        await sleep();
-                    }
-                    const existingAdded = (await storage.get({ [currentConfig.storageKey]: [] }))[currentConfig.storageKey];
-                    const newlyAdded = new Set([...existingAdded, ...itemsToAdd]);
-                    await storage.set({ [currentConfig.storageKey]: [...newlyAdded] });
-                    if (listType === 'allowlist') {
-                        itemsToAdd.forEach((item) => {
-                            const domain = normalizeImportedDomain(item);
-                            if (domain && !domainTags[domain]) domainTags[domain] = 'hagezi';
-                        });
-                        await storage.set({ [KEY_DOMAIN_TAGS]: domainTags });
-                    }
-                    showToast(`Successfully added ${itemsToAdd.length} entries.`, false);
+                    showToast(`Successfully added ${result.addedCount} entries.`, false);
                 }
 
             } else if (action === 'remove') {
@@ -2405,6 +2449,66 @@ function addGlobalStyle(css) {
             button.disabled = false;
             button.textContent = originalText;
         }
+    }
+
+    function notifyHageziAutoSync(results) {
+        const changedResults = results.filter(result =>
+            result.addedCount > 0 || result.diff.addedCount > 0 || result.diff.removedCount > 0
+        );
+        if (changedResults.length === 0) return;
+
+        const body = changedResults.map(result =>
+            `${result.listName}: ${result.addedCount} applied, upstream +${result.diff.addedCount}/-${result.diff.removedCount}`
+        ).join('; ');
+
+        showToast(`HaGeZi auto-sync updated: ${body}`, false, 7000);
+        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            try {
+                new Notification('NDNS HaGeZi auto-sync', { body });
+            } catch {}
+        }
+    }
+
+    async function runHageziAutoSync() {
+        if (!hageziAutoSyncConfig.enabled || hageziAutoSyncRunning) return;
+        if (!NDNS_API_KEY) return;
+        const profileId = getCurrentProfileId();
+        if (!profileId) return;
+
+        hageziAutoSyncRunning = true;
+        try {
+            const config = getHageziConfig(profileId);
+            const results = [];
+            for (const listType of ['tlds', 'allowlist']) {
+                results.push(await applyHageziListUpdates(listType, config[listType]));
+            }
+            hageziAutoSyncConfig.lastRun = Date.now();
+            await storage.set({ [KEY_HAGEZI_AUTO_SYNC]: hageziAutoSyncConfig });
+            updateHageziAutoSyncStatusElement();
+            notifyHageziAutoSync(results);
+        } catch (error) {
+            showToast(`HaGeZi auto-sync failed: ${error.message || 'Unknown error'}`, true, 6000);
+        } finally {
+            hageziAutoSyncRunning = false;
+        }
+    }
+
+    function initHageziAutoSync() {
+        if (hageziAutoSyncTimer) {
+            clearInterval(hageziAutoSyncTimer);
+            hageziAutoSyncTimer = null;
+        }
+        if (!hageziAutoSyncConfig.enabled) return;
+
+        const checkAndSync = async () => {
+            const lastRun = hageziAutoSyncConfig.lastRun || 0;
+            if (Date.now() - lastRun >= HAGEZI_AUTO_SYNC_INTERVAL_MS) {
+                await runHageziAutoSync();
+            }
+        };
+
+        checkAndSync();
+        hageziAutoSyncTimer = setInterval(checkAndSync, 60000);
     }
 
     // --- ONBOARDING & ACCOUNT HANDLING ---
@@ -6088,7 +6192,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.13'
+                    source: 'NDNS v3.4.14'
                 })
             });
         } catch {}
@@ -6413,6 +6517,27 @@ function addGlobalStyle(css) {
         hageziVersionStatus.className = 'settings-section-description';
         hageziVersionStatus.textContent = formatHageziVersionStatus();
 
+        const hageziAutoRow = document.createElement('div');
+        hageziAutoRow.className = 'settings-control-row';
+        hageziAutoRow.innerHTML = '<span>Weekly Auto-Sync</span>';
+
+        const hageziAutoStatus = document.createElement('div');
+        hageziAutoStatus.id = 'ndns-hagezi-auto-status';
+        hageziAutoStatus.className = 'settings-section-description';
+        hageziAutoStatus.textContent = formatHageziAutoSyncStatus();
+
+        const hageziAutoToggle = document.createElement('div');
+        hageziAutoToggle.className = `ndns-toggle-switch ${hageziAutoSyncConfig.enabled ? 'active' : ''}`;
+        hageziAutoToggle.onclick = async () => {
+            hageziAutoSyncConfig.enabled = !hageziAutoSyncConfig.enabled;
+            hageziAutoToggle.classList.toggle('active', hageziAutoSyncConfig.enabled);
+            await storage.set({ [KEY_HAGEZI_AUTO_SYNC]: hageziAutoSyncConfig });
+            updateHageziAutoSyncStatusElement();
+            if (hageziAutoSyncConfig.enabled) initHageziAutoSync();
+            else if (hageziAutoSyncTimer) { clearInterval(hageziAutoSyncTimer); hageziAutoSyncTimer = null; }
+        };
+        hageziAutoRow.appendChild(hageziAutoToggle);
+
         const hageziButtons = [
             { text: 'Apply TLD Blocklist', action: 'apply', type: 'tlds', danger: false },
             { text: 'Remove TLD Blocklist', action: 'remove', type: 'tlds', danger: true },
@@ -6428,6 +6553,7 @@ function addGlobalStyle(css) {
             hageziControls.appendChild(button);
         });
 
+        hageziControls.prepend(hageziAutoRow, hageziAutoStatus);
         hageziSection.append(hageziVersionStatus, hageziControls);
         modalBody.appendChild(hageziSection);
 
@@ -6758,7 +6884,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.13';
+        footer.textContent = 'NDNS v3.4.14';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -7592,6 +7718,7 @@ function addGlobalStyle(css) {
 
             // NDNS v3.4: Scheduled log downloads
             initScheduledLogs();
+            initHageziAutoSync();
         }
     }
 
