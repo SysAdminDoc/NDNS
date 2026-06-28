@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.12
+// @version      3.4.13
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -66,6 +66,8 @@ function addGlobalStyle(css) {
     const KEY_LIST_PAGE_THEME = `${KEY_PREFIX}list_page_theme_v1`;
     const KEY_HAGEZI_ADDED_TLDS = `${KEY_PREFIX}hagezi_added_tlds_v1`;
     const KEY_HAGEZI_ADDED_ALLOWLIST = `${KEY_PREFIX}hagezi_added_allowlist_v1`;
+    const KEY_HAGEZI_LIST_META = `${KEY_PREFIX}hagezi_list_meta_v1`;
+    const KEY_HAGEZI_LIST_SNAPSHOTS = `${KEY_PREFIX}hagezi_list_snapshots_v1`;
     // NEW KEYS for v2.0
     const KEY_ULTRA_CONDENSED = `${KEY_PREFIX}ultra_condensed_v1`;
     const KEY_CUSTOM_CSS_ENABLED = `${KEY_PREFIX}custom_css_enabled_v1`;
@@ -107,6 +109,8 @@ function addGlobalStyle(css) {
     let isPreloadingCancelled = false;
     let enableListPageTheme = true;
     let listPageThemeStyleElement = null;
+    let hageziListMeta = {};
+    let hageziListSnapshots = {};
     // NEW STATE for v2.0
     let isUltraCondensed = true;
     let customCssEnabled = true;
@@ -1837,6 +1841,8 @@ function addGlobalStyle(css) {
             [KEY_DOMAIN_UNDO_STACK]: [],
             [KEY_DOMAIN_OF_DAY]: {},
             [KEY_LIST_PAGE_THEME]: true,
+            [KEY_HAGEZI_LIST_META]: {},
+            [KEY_HAGEZI_LIST_SNAPSHOTS]: {},
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
             // NDNS features
@@ -1869,6 +1875,8 @@ function addGlobalStyle(css) {
         domainUndoStack = Array.isArray(values[KEY_DOMAIN_UNDO_STACK]) ? values[KEY_DOMAIN_UNDO_STACK].slice(0, 10) : [];
         domainOfDayState = values[KEY_DOMAIN_OF_DAY] || {};
         enableListPageTheme = values[KEY_LIST_PAGE_THEME];
+        hageziListMeta = values[KEY_HAGEZI_LIST_META] || {};
+        hageziListSnapshots = values[KEY_HAGEZI_LIST_SNAPSHOTS] || {};
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
         // NDNS features
@@ -2118,6 +2126,170 @@ function addGlobalStyle(css) {
         });
     }
 
+    function normalizeHageziItems(items) {
+        return Array.from(new Set(Array.from(items || [])
+            .map(item => String(item || '').trim().toLowerCase())
+            .filter(Boolean)))
+            .sort((a, b) => a.localeCompare(b));
+    }
+
+    function hashHageziItems(items) {
+        const data = normalizeHageziItems(items).join('\n');
+        let hash = 2166136261;
+        for (let i = 0; i < data.length; i++) {
+            hash = Math.imul(hash ^ data.charCodeAt(i), 16777619) >>> 0;
+        }
+        return hash.toString(16).padStart(8, '0');
+    }
+
+    function diffHageziItems(previousItems, currentItems) {
+        const previous = normalizeHageziItems(previousItems);
+        const current = normalizeHageziItems(currentItems);
+        const previousSet = new Set(previous);
+        const currentSet = new Set(current);
+        return {
+            previous,
+            current,
+            added: current.filter(item => !previousSet.has(item)),
+            removed: previous.filter(item => !currentSet.has(item))
+        };
+    }
+
+    function serializeHageziDiff(diff) {
+        const limit = 150;
+        return {
+            listType: diff.listType,
+            listName: diff.listName,
+            checkedAt: diff.checkedAt,
+            previousHash: diff.previousHash,
+            hash: diff.hash,
+            previousCount: diff.previousCount,
+            count: diff.count,
+            addedCount: diff.added.length,
+            removedCount: diff.removed.length,
+            added: diff.added.slice(0, limit),
+            removed: diff.removed.slice(0, limit),
+            addedOverflow: Math.max(0, diff.added.length - limit),
+            removedOverflow: Math.max(0, diff.removed.length - limit)
+        };
+    }
+
+    async function recordHageziListVersion(listType, items, listName) {
+        const previousItems = hageziListSnapshots[listType] || [];
+        const diff = diffHageziItems(previousItems, items);
+        const previousMeta = hageziListMeta[listType] || {};
+        const checkedAt = new Date().toISOString();
+        const hash = hashHageziItems(diff.current);
+
+        hageziListSnapshots[listType] = diff.current;
+        hageziListMeta[listType] = {
+            hash,
+            count: diff.current.length,
+            checkedAt,
+            addedCount: diff.added.length,
+            removedCount: diff.removed.length
+        };
+        await storage.set({
+            [KEY_HAGEZI_LIST_META]: hageziListMeta,
+            [KEY_HAGEZI_LIST_SNAPSHOTS]: hageziListSnapshots
+        });
+
+        return {
+            ...diff,
+            listType,
+            listName,
+            checkedAt,
+            previousHash: previousMeta.hash || '',
+            hash,
+            previousCount: diff.previous.length,
+            count: diff.current.length
+        };
+    }
+
+    function formatHageziVersionStatus() {
+        const rows = [
+            ['tlds', 'TLDs'],
+            ['allowlist', 'Allowlist']
+        ].map(([key, label]) => {
+            const meta = hageziListMeta[key];
+            if (!meta?.hash) return `${label}: not checked`;
+            const when = meta.checkedAt ? new Date(meta.checkedAt).toLocaleString() : 'unknown time';
+            return `${label}: ${meta.count} entries, ${meta.hash}, ${when}`;
+        });
+        return `Tracked upstream versions: ${rows.join(' | ')}`;
+    }
+
+    function renderHageziDiffColumn(title, items, overflow) {
+        const column = document.createElement('div');
+        column.style.cssText = 'min-width:0;';
+
+        const heading = document.createElement('div');
+        heading.style.cssText = 'font-size:12px;font-weight:700;margin-bottom:6px;color:var(--panel-text);';
+        heading.textContent = `${title} (${items.length + overflow})`;
+
+        const list = document.createElement('div');
+        list.style.cssText = 'max-height:220px;overflow:auto;border:1px solid var(--panel-border);border-radius:8px;background:var(--section-bg);padding:8px;font-family:monospace;font-size:11px;';
+
+        if (items.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.color = 'var(--panel-text-secondary)';
+            empty.textContent = 'No changes.';
+            list.appendChild(empty);
+        } else {
+            items.forEach((item) => {
+                const row = document.createElement('div');
+                row.textContent = item;
+                list.appendChild(row);
+            });
+            if (overflow > 0) {
+                const more = document.createElement('div');
+                more.style.color = 'var(--panel-text-secondary)';
+                more.textContent = `...and ${overflow} more`;
+                list.appendChild(more);
+            }
+        }
+
+        column.append(heading, list);
+        return column;
+    }
+
+    function showHageziDiffView(diff) {
+        if (!diff) return;
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.style.maxWidth = '720px';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = document.createElement('h3');
+        title.textContent = `${diff.listName} Upstream Diff`;
+
+        const summary = document.createElement('div');
+        summary.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin-bottom:10px;';
+        const previousHash = diff.previousHash || 'baseline';
+        summary.textContent = `${diff.previousCount} -> ${diff.count} entries, ${previousHash} -> ${diff.hash}, checked ${new Date(diff.checkedAt).toLocaleString()}.`;
+
+        const grid = document.createElement('div');
+        grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:10px;';
+        grid.append(
+            renderHageziDiffColumn('Added upstream', diff.added || [], diff.addedOverflow || 0),
+            renderHageziDiffColumn('Removed upstream', diff.removed || [], diff.removedOverflow || 0)
+        );
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button';
+        closeBtn.textContent = 'Close';
+        closeBtn.style.marginTop = '12px';
+        closeBtn.onclick = () => overlay.remove();
+
+        modal.append(title, summary, grid, closeBtn);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+    }
+
     async function manageHageziLists(action, listType, button) {
         const profileId = getCurrentProfileId();
         if (!profileId || !NDNS_API_KEY) return showToast("Profile ID or API Key missing.", true);
@@ -2154,12 +2326,15 @@ function addGlobalStyle(css) {
         try {
             if (action === 'apply') {
                 const remoteList = await fetchHageziList(currentConfig.url, currentConfig.parseType);
+                const remoteItems = [...remoteList];
+                const hageziDiff = await recordHageziListVersion(listType, remoteItems, currentConfig.name);
+                sessionStorage.setItem('ndns_hagezi_diff', JSON.stringify(serializeHageziDiff(hageziDiff)));
                 const apiResponse = await makeApiRequest('GET', currentConfig.getEndpoint);
                 const currentItems = new Set(
                     listType === 'tlds' ? apiResponse.data.tlds.map(t => t.id) : apiResponse.data.map(d => d.id)
                 );
 
-                const itemsToAdd = [...remoteList].filter(item => !currentItems.has(item));
+                const itemsToAdd = remoteItems.filter(item => !currentItems.has(item));
 
                 if (itemsToAdd.length === 0) {
                     showToast(`Your ${currentConfig.name} is already up to date.`, false);
@@ -5913,7 +6088,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.12'
+                    source: 'NDNS v3.4.13'
                 })
             });
         } catch {}
@@ -6234,6 +6409,10 @@ function addGlobalStyle(css) {
         const hageziControls = document.createElement('div');
         hageziControls.className = 'ndns-settings-controls';
 
+        const hageziVersionStatus = document.createElement('div');
+        hageziVersionStatus.className = 'settings-section-description';
+        hageziVersionStatus.textContent = formatHageziVersionStatus();
+
         const hageziButtons = [
             { text: 'Apply TLD Blocklist', action: 'apply', type: 'tlds', danger: false },
             { text: 'Remove TLD Blocklist', action: 'remove', type: 'tlds', danger: true },
@@ -6249,7 +6428,7 @@ function addGlobalStyle(css) {
             hageziControls.appendChild(button);
         });
 
-        hageziSection.appendChild(hageziControls);
+        hageziSection.append(hageziVersionStatus, hageziControls);
         modalBody.appendChild(hageziSection);
 
         // --- v3.4: Advanced Features Section ---
@@ -6579,7 +6758,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.12';
+        footer.textContent = 'NDNS v3.4.13';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -7329,6 +7508,16 @@ function addGlobalStyle(css) {
                 setTimeout(() => {
                     if (settingsModal) settingsModal.style.display = 'flex';
                 }, 500);
+            }
+
+            const hageziDiffPayload = sessionStorage.getItem('ndns_hagezi_diff');
+            if (hageziDiffPayload) {
+                sessionStorage.removeItem('ndns_hagezi_diff');
+                setTimeout(() => {
+                    try {
+                        showHageziDiffView(JSON.parse(hageziDiffPayload));
+                    } catch {}
+                }, 750);
             }
 
             const returnFlag = await storage.get(['ndns_return_from_account']);
