@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.11
+// @version      3.4.12
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -62,6 +62,7 @@ function addGlobalStyle(css) {
     const KEY_PROFILE_ID = `${KEY_PREFIX}profile_id_v1`;
     const KEY_DOMAIN_ACTIONS = `${KEY_PREFIX}domain_actions_v1`;
     const KEY_DOMAIN_UNDO_STACK = `${KEY_PREFIX}domain_undo_stack_v1`;
+    const KEY_DOMAIN_OF_DAY = `${KEY_PREFIX}domain_of_day_v1`;
     const KEY_LIST_PAGE_THEME = `${KEY_PREFIX}list_page_theme_v1`;
     const KEY_HAGEZI_ADDED_TLDS = `${KEY_PREFIX}hagezi_added_tlds_v1`;
     const KEY_HAGEZI_ADDED_ALLOWLIST = `${KEY_PREFIX}hagezi_added_allowlist_v1`;
@@ -99,6 +100,7 @@ function addGlobalStyle(css) {
     let hiddenDomains = new Set();
     let domainActions = {};
     let domainUndoStack = [];
+    let domainOfDayState = {};
     let autoRefreshInterval = null;
     let currentTheme = 'dark';
     let panelWidth = 240;
@@ -1833,6 +1835,7 @@ function addGlobalStyle(css) {
             [KEY_PROFILE_ID]: null,
             [KEY_DOMAIN_ACTIONS]: {},
             [KEY_DOMAIN_UNDO_STACK]: [],
+            [KEY_DOMAIN_OF_DAY]: {},
             [KEY_LIST_PAGE_THEME]: true,
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
@@ -1864,6 +1867,7 @@ function addGlobalStyle(css) {
         globalProfileId = values[KEY_PROFILE_ID];
         domainActions = values[KEY_DOMAIN_ACTIONS];
         domainUndoStack = Array.isArray(values[KEY_DOMAIN_UNDO_STACK]) ? values[KEY_DOMAIN_UNDO_STACK].slice(0, 10) : [];
+        domainOfDayState = values[KEY_DOMAIN_OF_DAY] || {};
         enableListPageTheme = values[KEY_LIST_PAGE_THEME];
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
@@ -2902,6 +2906,142 @@ function addGlobalStyle(css) {
             if (domain) domains.add(domain);
         });
         return Array.from(domains).slice(0, limit);
+    }
+
+    function getLocalDateKey(date = new Date()) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+    }
+
+    function chooseRandomDomain(domains, avoidDomain = '') {
+        const candidates = domains.filter(domain => domain !== avoidDomain);
+        const pool = candidates.length ? candidates : domains;
+        return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    async function pickDomainOfDay(forceNew = false) {
+        const recentDomains = collectRecentLogDomains(500)
+            .filter(domain => domain && !hiddenDomains.has(domain));
+        if (recentDomains.length === 0) {
+            showToast('No loaded log domains found to review.', true);
+            return null;
+        }
+
+        const today = getLocalDateKey();
+        const storedDomain = normalizeImportedDomain(domainOfDayState.domain || '');
+        const domain = (!forceNew && domainOfDayState.date === today && recentDomains.includes(storedDomain))
+            ? storedDomain
+            : chooseRandomDomain(recentDomains, storedDomain);
+
+        if (!domain) return null;
+        domainOfDayState = {
+            date: today,
+            domain,
+            poolSize: recentDomains.length,
+            pickedAt: new Date().toISOString()
+        };
+        await storage.set({ [KEY_DOMAIN_OF_DAY]: domainOfDayState });
+        return { domain, date: today, poolSize: recentDomains.length };
+    }
+
+    async function showDomainOfDay(forceNew = false) {
+        const pick = await pickDomainOfDay(forceNew);
+        if (!pick) return;
+
+        const pid = getCurrentProfileId();
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = document.createElement('h3');
+        title.textContent = 'Domain of the Day';
+
+        const help = document.createElement('p');
+        help.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;';
+        help.textContent = `${pick.date} pick from ${pick.poolSize} loaded query domains.`;
+
+        const domainBox = document.createElement('div');
+        domainBox.style.cssText = 'font-family:monospace;font-size:15px;font-weight:700;padding:10px;border:1px solid var(--panel-border);border-radius:8px;background:var(--section-bg);word-break:break-all;';
+        domainBox.textContent = pick.domain;
+
+        const rootDomain = extractRootDomain(pick.domain);
+        const rootBox = document.createElement('div');
+        rootBox.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin-top:6px;';
+        rootBox.textContent = rootDomain === pick.domain ? 'Root domain selected.' : `Root domain: ${rootDomain}`;
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);min-height:18px;margin-top:10px;';
+        statusEl.textContent = 'Ready for review.';
+
+        const actionGrid = document.createElement('div');
+        actionGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;';
+
+        const addActionButton = (label, mode, domain) => {
+            const button = document.createElement('button');
+            button.className = 'ndns-panel-button';
+            button.textContent = label;
+            button.onclick = async () => {
+                if (!NDNS_API_KEY) return showToast('API Key not set.', true);
+                if (!pid) return showToast('Could not find Profile ID.', true);
+                button.disabled = true;
+                statusEl.textContent = `Adding ${domain} to ${mode === 'deny' ? 'denylist' : 'allowlist'}...`;
+                try {
+                    await addDomainToList(domain, mode, pid);
+                    invalidateLogCache();
+                    cleanLogs();
+                    statusEl.textContent = `${domain} added to ${mode === 'deny' ? 'denylist' : 'allowlist'}.`;
+                    showToast(statusEl.textContent, false, 2500);
+                } catch (error) {
+                    statusEl.textContent = `Action failed: ${error.message || 'Unknown error'}`;
+                    showToast(statusEl.textContent, true, 5000);
+                } finally {
+                    button.disabled = false;
+                }
+            };
+            actionGrid.appendChild(button);
+        };
+
+        addActionButton('Block Domain', 'deny', pick.domain);
+        addActionButton('Allow Domain', 'allow', pick.domain);
+        addActionButton('Block Root', 'deny', rootDomain);
+        addActionButton('Allow Root', 'allow', rootDomain);
+
+        const utilityRow = document.createElement('div');
+        utilityRow.className = 'modal-actions';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'ndns-panel-button';
+        copyBtn.textContent = 'Copy';
+        copyBtn.onclick = () => copyToClipboard(pick.domain);
+
+        const searchBtn = document.createElement('button');
+        searchBtn.className = 'ndns-panel-button';
+        searchBtn.textContent = 'Search';
+        searchBtn.onclick = () => window.open(`https://www.google.com/search?q=${encodeURIComponent(pick.domain)}`, '_blank');
+
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'ndns-panel-button';
+        nextBtn.textContent = 'Pick Another';
+        nextBtn.onclick = () => {
+            overlay.remove();
+            showDomainOfDay(true);
+        };
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button danger';
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => overlay.remove();
+
+        utilityRow.append(copyBtn, searchBtn, nextBtn, closeBtn);
+        modal.append(title, help, domainBox, rootBox, actionGrid, statusEl, utilityRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
     }
 
     function buildDomainMatcher(mode, pattern) {
@@ -5773,7 +5913,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.11'
+                    source: 'NDNS v3.4.12'
                 })
             });
         } catch {}
@@ -6327,7 +6467,13 @@ function addGlobalStyle(css) {
         clearLogBtn.dataset.tooltip = 'Delete all log entries';
         clearLogBtn.onclick = quickClearLogs;
 
-        logActionSection.append(downloadLogBtn, clearLogBtn);
+        const reviewDomainBtn = document.createElement('button');
+        reviewDomainBtn.className = 'ndns-panel-button ndns-tooltip';
+        reviewDomainBtn.textContent = 'Review Domain';
+        reviewDomainBtn.dataset.tooltip = 'Pick one loaded query domain for review';
+        reviewDomainBtn.onclick = () => showDomainOfDay(false);
+
+        logActionSection.append(downloadLogBtn, clearLogBtn, reviewDomainBtn);
         content.appendChild(logActionSection);
 
         // --- FILTER BUTTONS (only on logs page) ---
@@ -6433,7 +6579,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.11';
+        footer.textContent = 'NDNS v3.4.12';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
