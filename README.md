@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.24-7f5af0?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.4.25-7f5af0?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptMonkey-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/github/license/SysAdminDoc/NDNS?style=flat-square" alt="License">
 </p>
@@ -36,7 +36,7 @@ NDNS transforms the NextDNS dashboard at [my.nextdns.io](https://my.nextdns.io) 
 | **Parental Controls** | Quick-toggle parental control categories, Safe / Work / Chill bulk presets, recreation time, a local weekly 7x24 heatmap schedule, and device-activity override schedules from the settings modal. |
 | **HaGeZi Integration** | One-click sync of TLD blocklists and allowlists from HaGeZi's curated adblock lists, local hosts/AdBlock blocklist import, per-list upstream hashes, counts, diff views after updates, optional weekly auto-sync notifications, and allow/deny conflict resolution. |
 | **Webhook Alerts** | Send domain query events to Discord, Slack, or any webhook URL. Configurable filter expressions, editable Generic JSON / Discord / Slack payload templates, test sends, last-5 delivery logs, and duplicate-event rate limiting. |
-| **Theming** | Dark, Dark Blue, and Light themes. List page theme override. Ultra-condensed mode. Theme Studio custom CSS editor with live preview plus export/import. |
+| **Theming** | Dark, Dark Blue, and Light themes. List page theme override. Compact/roomy panel density, ultra-condensed mode, and Theme Studio custom CSS editor with live preview plus export/import. |
 | **Scheduled Logs** | Automatic log downloads on a configurable schedule with desktop notifications. |
 
 ---

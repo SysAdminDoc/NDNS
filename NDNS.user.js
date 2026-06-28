@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.24
+// @version      3.4.25
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -73,6 +73,7 @@ function addGlobalStyle(css) {
     const KEY_ULTRA_CONDENSED = `${KEY_PREFIX}ultra_condensed_v1`;
     const KEY_CUSTOM_CSS_ENABLED = `${KEY_PREFIX}custom_css_enabled_v1`;
     const KEY_THEME_STUDIO_CSS = `${KEY_PREFIX}theme_studio_css_v1`;
+    const KEY_DENSITY_MODE = `${KEY_PREFIX}density_mode_v1`;
     // NEW KEYS for v2.5 (NDNS features)
     const KEY_DOMAIN_DESCRIPTIONS = `${KEY_PREFIX}domain_descriptions_v1`;
     const KEY_DOMAIN_TAGS = `${KEY_PREFIX}domain_tags_v1`;
@@ -128,6 +129,7 @@ function addGlobalStyle(css) {
     let ultraCondensedStyleElement = null;
     let themeStudioCss = '';
     let themeStudioStyleElement = null;
+    let densityMode = 'compact';
     // NEW STATE for v2.5 (NDNS features)
     let domainDescriptions = {};
     let domainTags = {};
@@ -1210,6 +1212,19 @@ function addGlobalStyle(css) {
         html.ndns-compact-mode .ndns-inline-controls button { font-size: 10px; }
         html.ndns-compact-mode .log .text-end .fa-lock { display: none; }
         html.ndns-compact-mode .log .text-end > .notranslate { display: none; }
+        html[data-ndns-density="roomy"] button.ndns-panel-button {
+            padding: 9px 12px; min-height: 34px; font-size: 12px; line-height: 1.25;
+        }
+        html[data-ndns-density="roomy"] div.ndns-panel-content { gap: 10px; padding: 10px; }
+        html[data-ndns-density="roomy"] .settings-control-row { padding: 8px 0; }
+        html[data-ndns-density="roomy"] .ndns-settings-section { margin-bottom: 18px; }
+        html[data-ndns-density="roomy"] .ndns-parental-toggle,
+        html[data-ndns-density="roomy"] .ndns-regex-item,
+        html[data-ndns-density="roomy"] .ndns-webhook-domain-item,
+        html[data-ndns-density="roomy"] .ndns-device-override-row {
+            padding: 9px 12px; margin-bottom: 6px;
+        }
+        html[data-ndns-density="roomy"] .log.list-group-item { padding-top: 8px; padding-bottom: 8px; }
 
         /* Export Button */
         #export-hosts-btn { display: inline-flex; align-items: center; justify-content: center; transition: all 0.2s ease; }
@@ -1932,6 +1947,7 @@ function addGlobalStyle(css) {
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
             [KEY_THEME_STUDIO_CSS]: '',
+            [KEY_DENSITY_MODE]: 'compact',
             // NDNS features
             [KEY_DOMAIN_DESCRIPTIONS]: {},
             [KEY_DOMAIN_TAGS]: {},
@@ -1973,6 +1989,7 @@ function addGlobalStyle(css) {
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
         themeStudioCss = String(values[KEY_THEME_STUDIO_CSS] || '');
+        densityMode = values[KEY_DENSITY_MODE] === 'roomy' ? 'roomy' : 'compact';
         // NDNS features
         domainDescriptions = values[KEY_DOMAIN_DESCRIPTIONS];
         domainTags = values[KEY_DOMAIN_TAGS];
@@ -4517,6 +4534,11 @@ function addGlobalStyle(css) {
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-ndns-theme', theme);
         currentTheme = theme;
+    }
+
+    function applyDensityMode(mode) {
+        densityMode = mode === 'roomy' ? 'roomy' : 'compact';
+        document.documentElement.setAttribute('data-ndns-density', densityMode);
     }
 
     function applyThemeStudioCss(css = themeStudioCss) {
@@ -7461,7 +7483,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.24',
+            source: 'NDNS v3.4.25',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7775,6 +7797,39 @@ function addGlobalStyle(css) {
         themeBtnGroup.append(lightBtn, darkBtn, darkBlueBtn);
         themeRow.appendChild(themeBtnGroup);
         appearControls.appendChild(themeRow);
+
+        const densityRow = document.createElement('div');
+        densityRow.className = 'settings-control-row';
+        densityRow.innerHTML = '<span>Panel Density</span>';
+        const densityBtnGroup = document.createElement('div');
+        densityBtnGroup.className = 'btn-group';
+
+        const updateDensityBtns = (activeDensity) => {
+            compactDensityBtn.classList.toggle('active', activeDensity === 'compact');
+            roomyDensityBtn.classList.toggle('active', activeDensity === 'roomy');
+        };
+
+        const compactDensityBtn = document.createElement('button');
+        compactDensityBtn.textContent = 'Compact';
+        compactDensityBtn.className = `ndns-panel-button ndns-btn-sm ${densityMode === 'compact' ? 'active' : ''}`;
+        compactDensityBtn.onclick = async () => {
+            applyDensityMode('compact');
+            await storage.set({ [KEY_DENSITY_MODE]: 'compact' });
+            updateDensityBtns('compact');
+        };
+
+        const roomyDensityBtn = document.createElement('button');
+        roomyDensityBtn.textContent = 'Roomy';
+        roomyDensityBtn.className = `ndns-panel-button ndns-btn-sm ${densityMode === 'roomy' ? 'active' : ''}`;
+        roomyDensityBtn.onclick = async () => {
+            applyDensityMode('roomy');
+            await storage.set({ [KEY_DENSITY_MODE]: 'roomy' });
+            updateDensityBtns('roomy');
+        };
+
+        densityBtnGroup.append(compactDensityBtn, roomyDensityBtn);
+        densityRow.appendChild(densityBtnGroup);
+        appearControls.appendChild(densityRow);
 
         // Toggle options
         const toggleOptions = [
@@ -8288,7 +8343,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.24';
+        footer.textContent = 'NDNS v3.4.25';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -8996,6 +9051,7 @@ function addGlobalStyle(css) {
     async function main() {
         await initializeState();
         applyTheme(currentTheme);
+        applyDensityMode(densityMode);
         applyUltraCondensedMode(isUltraCondensed);
         applyThemeStudioCss(themeStudioCss);
         applyListPageTheme();
