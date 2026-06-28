@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.27
+// @version      3.4.28
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -102,6 +102,11 @@ function addGlobalStyle(css) {
     const HAGEZI_TLDS_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-aggressive.txt";
     const HAGEZI_ALLOWLIST_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-allow.txt";
     const HAGEZI_AUTO_SYNC_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+    const API_REQUEST_TIMEOUT_MS = 30000;
+    const API_MAX_RETRIES = 2;
+    const API_RETRY_BASE_DELAY_MS = 600;
+    const API_RETRY_MAX_DELAY_MS = 10000;
+    const NON_RETRYABLE_WRITE_METHODS = new Set(['POST']);
 
     // --- GLOBAL STATE ---
     let panel, lockButton, settingsModal, togglePosButton, settingsButton;
@@ -2055,37 +2060,124 @@ function addGlobalStyle(css) {
         parentalDeviceOverrides = normalizeParentalDeviceOverrides(values[KEY_PARENTAL_DEVICE_OVERRIDES]);
     }
 
-    async function makeApiRequest(method, endpoint, body = null, apiKey = NDNS_API_KEY, customUrl = null) {
+    function delayRequest(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function createRequestError(message, meta = {}) {
+        const error = new Error(message);
+        Object.assign(error, meta);
+        return error;
+    }
+
+    function getResponseHeader(responseHeaders = '', name) {
+        const wanted = name.toLowerCase();
+        return String(responseHeaders || '').split(/\r?\n/).reduce((found, line) => {
+            if (found) return found;
+            const idx = line.indexOf(':');
+            if (idx === -1) return '';
+            return line.slice(0, idx).trim().toLowerCase() === wanted ? line.slice(idx + 1).trim() : '';
+        }, '');
+    }
+
+    function parseRetryAfterMs(responseHeaders = '') {
+        const value = getResponseHeader(responseHeaders, 'retry-after');
+        if (!value) return null;
+        const seconds = Number(value);
+        if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+        const retryAt = Date.parse(value);
+        return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : null;
+    }
+
+    function canRetryMethod(method, options = {}) {
+        const normalized = String(method || 'GET').toUpperCase();
+        return options.retryNonIdempotent === true || !NON_RETRYABLE_WRITE_METHODS.has(normalized);
+    }
+
+    function isRetryableStatus(status) {
+        return status === 429 || (status >= 500 && status <= 599);
+    }
+
+    function getRetryDelayMs(responseOrError, attempt) {
+        const retryAfterMs = parseRetryAfterMs(responseOrError?.responseHeaders);
+        if (Number.isFinite(retryAfterMs)) return Math.min(retryAfterMs, API_RETRY_MAX_DELAY_MS);
+        const jitter = Math.floor(Math.random() * 150);
+        return Math.min(API_RETRY_MAX_DELAY_MS, (API_RETRY_BASE_DELAY_MS * (2 ** attempt)) + jitter);
+    }
+
+    function gmXmlHttpRequestOnce(options) {
         return new Promise((resolve, reject) => {
             try {
-                const headers = { 'X-Api-Key': apiKey };
-                if (body) headers['Content-Type'] = 'application/json;charset=utf-8';
                 GM_xmlhttpRequest({
-                    method: method,
-                    url: customUrl || `https://api.nextdns.io${endpoint}`,
-                    headers: headers,
-                    data: body ? JSON.stringify(body) : undefined,
-                    responseType: 'json',
-                    onload: (response) => {
-                        if (response.status >= 200 && response.status < 300) {
-                            resolve(response.response || {});
-                        } else if (response.status === 404 && method === 'DELETE') {
-                            resolve({});
-                        } else {
-                            const errorMsg = response.response?.errors?.[0]?.detail || `${response.status}: ${response.statusText || 'Error'}`;
-                            reject(new Error(errorMsg));
-                        }
-                    },
-                    onerror: (response) => {
-                        reject(new Error(`Network request failed: ${response?.statusText || 'unknown error'}`));
-                    },
-                    ontimeout: () => {
-                        reject(new Error('Request timed out'));
-                    }
+                    timeout: API_REQUEST_TIMEOUT_MS,
+                    ...options,
+                    onload: resolve,
+                    onerror: (response) => reject(createRequestError(`Network request failed: ${response?.statusText || 'unknown error'}`, {
+                        isNetworkError: true,
+                        status: response?.status,
+                        responseHeaders: response?.responseHeaders || ''
+                    })),
+                    ontimeout: () => reject(createRequestError('Request timed out', { isTimeout: true }))
                 });
             } catch (e) {
-                reject(new Error(`Request setup failed: ${e?.message || 'unknown'}`));
+                reject(createRequestError(`Request setup failed: ${e?.message || 'unknown'}`, { isSetupError: true }));
             }
+        });
+    }
+
+    async function gmXmlHttpRequestWithRetry(options, retryOptions = {}) {
+        const method = String(options.method || 'GET').toUpperCase();
+        const maxRetries = Number.isFinite(Number(retryOptions.retries)) ? Number(retryOptions.retries) : API_MAX_RETRIES;
+        const canRetry = retryOptions.retry !== false && canRetryMethod(method, retryOptions);
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            try {
+                const response = await gmXmlHttpRequestOnce(options);
+                response.ndnsAttempts = attempt + 1;
+                if (canRetry && attempt < maxRetries && isRetryableStatus(response.status)) {
+                    const delay = getRetryDelayMs(response, attempt);
+                    console.warn(`[NDNS] Retrying ${method} ${options.url} after HTTP ${response.status} in ${delay}ms`);
+                    await delayRequest(delay);
+                    continue;
+                }
+                return response;
+            } catch (error) {
+                error.ndnsAttempts = attempt + 1;
+                const retryableFailure = error.isTimeout || error.isNetworkError;
+                if (!canRetry || !retryableFailure || attempt >= maxRetries) throw error;
+                const delay = getRetryDelayMs(error, attempt);
+                console.warn(`[NDNS] Retrying ${method} ${options.url} after ${error.message} in ${delay}ms`);
+                await delayRequest(delay);
+            }
+        }
+
+        throw createRequestError('Request failed after retry loop');
+    }
+
+    async function makeApiRequest(method, endpoint, body = null, apiKey = NDNS_API_KEY, customUrl = null, options = {}) {
+        const normalizedMethod = String(method || 'GET').toUpperCase();
+        const headers = { 'X-Api-Key': apiKey };
+        if (body) headers['Content-Type'] = 'application/json;charset=utf-8';
+
+        const response = await gmXmlHttpRequestWithRetry({
+            method: normalizedMethod,
+            url: customUrl || `https://api.nextdns.io${endpoint}`,
+            headers,
+            data: body ? JSON.stringify(body) : undefined,
+            responseType: 'json',
+            timeout: options.timeoutMs || API_REQUEST_TIMEOUT_MS
+        }, options);
+
+        if (response.status >= 200 && response.status < 300) return response.response || {};
+        if (response.status === 404 && normalizedMethod === 'DELETE') return {};
+
+        const errorMsg = response.response?.errors?.[0]?.detail || `${response.status}: ${response.statusText || 'Error'}`;
+        const attempts = response.ndnsAttempts || 1;
+        throw createRequestError(attempts > 1 ? `${errorMsg} after ${attempts} attempts` : errorMsg, {
+            status: response.status,
+            statusText: response.statusText,
+            responseHeaders: response.responseHeaders || '',
+            ndnsAttempts: attempts
         });
     }
 
@@ -2149,30 +2241,25 @@ function addGlobalStyle(css) {
     // header re-attached fails ("Failed to fetch"). Use ?redirect=0 to get the
     // public URL as JSON, then fetch that URL directly with no auth header.
     function fetchLogsCsv(profileId) {
-        const gmRequest = (opts) => new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                onerror: () => reject(new Error('Network request failed')),
-                ontimeout: () => reject(new Error('Request timed out')),
-                ...opts
-            });
-        });
-
-        return gmRequest({
+        return gmXmlHttpRequestWithRetry({
             method: 'GET',
             url: `https://api.nextdns.io/profiles/${profileId}/logs/download?redirect=0`,
             headers: { 'X-Api-Key': NDNS_API_KEY },
-            responseType: 'json'
+            responseType: 'json',
+            timeout: API_REQUEST_TIMEOUT_MS
         }).then((meta) => {
             if (meta.status < 200 || meta.status >= 300) {
-                throw new Error(`API Error: ${meta.status}`);
+                const attempts = meta.ndnsAttempts || 1;
+                throw new Error(`API Error: ${meta.status}${attempts > 1 ? ` after ${attempts} attempts` : ''}`);
             }
             const fileUrl = meta.response?.url || meta.response?.data?.url;
             if (!fileUrl) throw new Error('No log file URL returned by API');
             // Public pre-signed URL — must NOT send X-Api-Key (would be rejected).
-            return gmRequest({ method: 'GET', url: fileUrl });
+            return gmXmlHttpRequestWithRetry({ method: 'GET', url: fileUrl, timeout: API_REQUEST_TIMEOUT_MS });
         }).then((file) => {
             if (file.status < 200 || file.status >= 300) {
-                throw new Error(`Download Error: ${file.status}`);
+                const attempts = file.ndnsAttempts || 1;
+                throw new Error(`Download Error: ${file.status}${attempts > 1 ? ` after ${attempts} attempts` : ''}`);
             }
             return file.responseText;
         });
@@ -2259,27 +2346,24 @@ function addGlobalStyle(css) {
 
     // --- HAGEZI INTEGRATION ---
     async function fetchHageziList(url, type) {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                onload: (response) => {
-                    if (response.status >= 200 && response.status < 300) {
-                        const content = response.responseText.trim();
-                        let items;
-                        if (type === 'tld') {
-                            items = content.match(/^\|\|(xn--)?\w+\^$/gm)?.map(e => e.slice(2, -1)) || [];
-                        } else {
-                            items = content.split("\n").map(e => e.slice(4, -1));
-                        }
-                        resolve(new Set(items));
-                    } else {
-                        reject(new Error(`Failed to fetch list: ${response.statusText}`));
-                    }
-                },
-                onerror: (err) => reject(new Error('Network error fetching list.'))
-            });
+        const response = await gmXmlHttpRequestWithRetry({
+            method: 'GET',
+            url,
+            timeout: API_REQUEST_TIMEOUT_MS
         });
+        if (response.status < 200 || response.status >= 300) {
+            const attempts = response.ndnsAttempts || 1;
+            throw new Error(`Failed to fetch list: ${response.statusText || response.status}${attempts > 1 ? ` after ${attempts} attempts` : ''}`);
+        }
+
+        const content = response.responseText.trim();
+        let items;
+        if (type === 'tld') {
+            items = content.match(/^\|\|(xn--)?\w+\^$/gm)?.map(e => e.slice(2, -1)) || [];
+        } else {
+            items = content.split("\n").map(e => e.slice(4, -1));
+        }
+        return new Set(items);
     }
 
     function normalizeHageziItems(items) {
@@ -7488,6 +7572,7 @@ function addGlobalStyle(css) {
                 url: webhookUrl,
                 headers: { 'Content-Type': 'application/json' },
                 data: JSON.stringify(payload),
+                timeout: API_REQUEST_TIMEOUT_MS,
                 onload: (response) => {
                     const ok = response.status >= 200 && response.status < 300;
                     recordWebhookDelivery({
@@ -7497,7 +7582,8 @@ function addGlobalStyle(css) {
                         message: ok ? 'Delivered' : (response.statusText || 'HTTP error')
                     });
                 },
-                onerror: () => recordWebhookDelivery({ type, ok: false, message: 'Network error' })
+                onerror: () => recordWebhookDelivery({ type, ok: false, message: 'Network error' }),
+                ontimeout: () => recordWebhookDelivery({ type, ok: false, message: 'Request timed out' })
             });
         } catch (error) {
             recordWebhookDelivery({ type, ok: false, message: error.message || 'Request failed' });
@@ -7523,7 +7609,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.27',
+            source: 'NDNS v3.4.28',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8383,7 +8469,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.27';
+        footer.textContent = 'NDNS v3.4.28';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
