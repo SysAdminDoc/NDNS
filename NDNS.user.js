@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.25
+// @version      3.4.26
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1225,6 +1225,46 @@ function addGlobalStyle(css) {
             padding: 9px 12px; margin-bottom: 6px;
         }
         html[data-ndns-density="roomy"] .log.list-group-item { padding-top: 8px; padding-bottom: 8px; }
+
+        @media (max-width: 680px) {
+            .ndns-panel,
+            .ndns-panel.left-side,
+            .ndns-panel.right-side {
+                top: auto !important; left: 8px !important; right: 8px !important; bottom: 0 !important;
+                width: calc(100vw - 16px) !important; min-width: 0 !important; max-width: none !important;
+                border: 1px solid var(--panel-border) !important; border-bottom: 0 !important;
+                border-radius: 16px 16px 0 0 !important;
+                transform: translateY(calc(100% - 48px));
+            }
+            .ndns-panel.visible,
+            .ndns-panel.left-side.visible,
+            .ndns-panel.right-side.visible {
+                transform: translateY(0);
+            }
+            .ndns-panel.left-side .ndns-panel-header,
+            .ndns-panel.right-side .ndns-panel-header {
+                border-radius: 16px 16px 0 0;
+            }
+            .ndns-panel-header { cursor: default; padding: 10px 12px; }
+            div.ndns-panel-content {
+                max-height: min(62vh, calc(100vh - 160px));
+                padding: 8px;
+            }
+            .ndns-panel-footer { padding: 8px 12px; }
+            .ndns-settings-modal-overlay {
+                align-items: stretch; justify-content: stretch; padding: 8px; box-sizing: border-box;
+            }
+            .ndns-settings-modal-content {
+                width: 100%; max-width: none; max-height: calc(100vh - 16px); border-radius: 14px;
+            }
+            .ndns-settings-modal-header {
+                align-items: flex-start; text-align: left; padding: 14px 44px 12px 16px;
+            }
+            .ndns-settings-modal-body { padding: 12px; }
+            .settings-control-row { gap: 8px; align-items: flex-start; }
+            .settings-control-row .btn-group { flex-wrap: wrap; justify-content: flex-end; }
+            .ndns-parental-presets { grid-template-columns: 1fr; }
+        }
 
         /* Export Button */
         #export-hosts-btn { display: inline-flex; align-items: center; justify-content: center; transition: all 0.2s ease; }
@@ -7483,7 +7523,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.25',
+            source: 'NDNS v3.4.26',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8343,7 +8383,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.25';
+        footer.textContent = 'NDNS v3.4.26';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
