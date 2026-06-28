@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.17
+// @version      3.4.18
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -89,6 +89,7 @@ function addGlobalStyle(css) {
     const KEY_SCHEDULED_LOGS = `${KEY_PREFIX}scheduled_logs_v1`;
     const KEY_WEBHOOK_URL = `${KEY_PREFIX}webhook_url_v1`;
     const KEY_WEBHOOK_DOMAINS = `${KEY_PREFIX}webhook_domains_v1`;
+    const KEY_WEBHOOK_TEMPLATE = `${KEY_PREFIX}webhook_template_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
 
     // --- HAGEZI CONFIG ---
@@ -137,6 +138,7 @@ function addGlobalStyle(css) {
     let scheduledLogsConfig = { enabled: false, interval: 'daily', lastRun: null };
     let webhookUrl = '';
     let webhookDomains = [];
+    let webhookTemplate = { preset: 'generic', template: '' };
     let showCnameChain = true;
     let scheduledLogTimer = null;
     // SLDs for proper root domain detection (unified list used everywhere)
@@ -1622,11 +1624,12 @@ function addGlobalStyle(css) {
 
         /* Webhook Config */
         .ndns-webhook-config { margin-top: 8px; }
-        .ndns-webhook-config input {
+        .ndns-webhook-config input, .ndns-webhook-config select, .ndns-webhook-config textarea {
             width: 100%; padding: 6px 8px; border-radius: 6px; font-size: 12px;
             background: var(--input-bg); color: var(--input-text); border: 1px solid var(--input-border);
             margin-bottom: 4px; box-sizing: border-box;
         }
+        .ndns-webhook-config textarea { min-height: 130px; resize: vertical; font-family: monospace; }
         .ndns-webhook-domains-list { font-size: 11px; max-height: 100px; overflow-y: auto; margin: 4px 0; }
         .ndns-webhook-domain-item {
             display: flex; align-items: center; justify-content: space-between;
@@ -1868,6 +1871,7 @@ function addGlobalStyle(css) {
             [KEY_SCHEDULED_LOGS]: { enabled: false, interval: 'daily', lastRun: null },
             [KEY_WEBHOOK_URL]: '',
             [KEY_WEBHOOK_DOMAINS]: [],
+            [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
             [KEY_SHOW_CNAME_CHAIN]: true
         });
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
@@ -1903,6 +1907,7 @@ function addGlobalStyle(css) {
         scheduledLogsConfig = values[KEY_SCHEDULED_LOGS];
         webhookUrl = values[KEY_WEBHOOK_URL];
         webhookDomains = values[KEY_WEBHOOK_DOMAINS];
+        webhookTemplate = { preset: 'generic', template: '', ...(values[KEY_WEBHOOK_TEMPLATE] || {}) };
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
     }
 
@@ -6402,6 +6407,43 @@ function addGlobalStyle(css) {
 
     // --- WEBHOOK/ALERT INTEGRATION ---
     const webhookSentDomains = new Set();
+    const WEBHOOK_TEMPLATE_PRESETS = {
+        generic: `{
+  "event": "domain_query",
+  "domain": "{{domain}}",
+  "device": "{{device}}",
+  "status": "{{status}}",
+  "matchedFilter": "{{matchedFilter}}",
+  "timestamp": "{{timestamp}}",
+  "profile": "{{profile}}",
+  "source": "{{source}}"
+}`,
+        discord: `{
+  "embeds": [
+    {
+      "title": "NDNS domain query",
+      "color": {{color}},
+      "fields": [
+        { "name": "Domain", "value": "{{domain}}", "inline": true },
+        { "name": "Status", "value": "{{status}}", "inline": true },
+        { "name": "Device", "value": "{{device}}", "inline": true },
+        { "name": "Filter", "value": "{{matchedFilter}}", "inline": false }
+      ],
+      "timestamp": "{{timestamp}}"
+    }
+  ]
+}`,
+        slack: `{
+  "text": "NDNS {{status}} query: {{domain}}",
+  "blocks": [
+    { "type": "section", "text": { "type": "mrkdwn", "text": "*NDNS {{status}} query*\\n\`{{domain}}\`" } },
+    { "type": "context", "elements": [
+      { "type": "mrkdwn", "text": "Device: {{device}}" },
+      { "type": "mrkdwn", "text": "Filter: {{matchedFilter}}" }
+    ] }
+  ]
+}`
+    };
 
     function matchesWebhookPattern(pattern, value) {
         const target = String(value || '');
@@ -6461,6 +6503,41 @@ function addGlobalStyle(css) {
                '';
     }
 
+    function escapeWebhookTemplateValue(value) {
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+        return JSON.stringify(String(value ?? '')).slice(1, -1);
+    }
+
+    function renderWebhookTemplate(template, context) {
+        return String(template || '').replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_, key) =>
+            escapeWebhookTemplateValue(context[key] ?? '')
+        );
+    }
+
+    function buildGenericWebhookPayload(context, templateError = '') {
+        return {
+            event: 'domain_query',
+            domain: context.domain,
+            device: context.device,
+            status: context.status,
+            matchedFilter: context.matchedFilter,
+            timestamp: context.timestamp,
+            profile: context.profile,
+            source: context.source,
+            ...(templateError ? { templateError } : {})
+        };
+    }
+
+    function buildWebhookPayload(context) {
+        const preset = webhookTemplate.preset || 'generic';
+        const template = webhookTemplate.template || WEBHOOK_TEMPLATE_PRESETS[preset] || WEBHOOK_TEMPLATE_PRESETS.generic;
+        try {
+            return JSON.parse(renderWebhookTemplate(template, context));
+        } catch (error) {
+            return buildGenericWebhookPayload(context, `Invalid webhook template JSON: ${error.message || 'parse failed'}`);
+        }
+    }
+
     function checkWebhookAlert(domain, context = {}) {
         if (!webhookUrl || webhookDomains.length === 0) return;
         const payloadContext = {
@@ -6476,22 +6553,21 @@ function addGlobalStyle(css) {
         if (!matchedFilter) return;
         webhookSentDomains.add(sentKey);
 
+        const templateContext = {
+            ...payloadContext,
+            matchedFilter,
+            timestamp: payloadContext.timestamp.toISOString(),
+            profile: getCurrentProfileId(),
+            source: 'NDNS v3.4.18',
+            color: payloadContext.status === 'blocked' ? 15020400 : 2926205
+        };
 
         try {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: webhookUrl,
                 headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify({
-                    event: 'domain_query',
-                    domain: domain,
-                    device: payloadContext.device,
-                    status: payloadContext.status,
-                    matchedFilter,
-                    timestamp: payloadContext.timestamp.toISOString(),
-                    profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.17'
-                })
+                data: JSON.stringify(buildWebhookPayload(templateContext))
             });
         } catch {}
     }
@@ -6512,6 +6588,77 @@ function addGlobalStyle(css) {
             showToast('Webhook URL saved.');
         };
         container.appendChild(urlInput);
+
+        const templateDesc = document.createElement('div');
+        templateDesc.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 6px 0 4px;';
+        templateDesc.textContent = 'Payload template. Presets support placeholders like {{domain}}, {{status}}, {{device}}, {{timestamp}}, {{profile}}, and {{matchedFilter}}.';
+        container.appendChild(templateDesc);
+
+        const templateSelect = document.createElement('select');
+        [
+            ['generic', 'Generic JSON'],
+            ['discord', 'Discord Embed'],
+            ['slack', 'Slack Block Kit']
+        ].forEach(([value, label]) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            templateSelect.appendChild(option);
+        });
+        templateSelect.value = webhookTemplate.preset || 'generic';
+
+        const templateArea = document.createElement('textarea');
+        const loadSelectedTemplate = () => {
+            templateArea.value = webhookTemplate.preset === templateSelect.value && webhookTemplate.template
+                ? webhookTemplate.template
+                : WEBHOOK_TEMPLATE_PRESETS[templateSelect.value] || WEBHOOK_TEMPLATE_PRESETS.generic;
+        };
+        templateSelect.onchange = loadSelectedTemplate;
+        loadSelectedTemplate();
+
+        const templateActions = document.createElement('div');
+        templateActions.style.cssText = 'display:flex;gap:4px;margin-bottom:8px;';
+
+        const saveTemplateBtn = document.createElement('button');
+        saveTemplateBtn.className = 'ndns-panel-button ndns-btn-sm';
+        saveTemplateBtn.textContent = 'Save Template';
+        saveTemplateBtn.onclick = async () => {
+            const sample = {
+                domain: 'ads.example.com',
+                device: 'laptop',
+                status: 'blocked',
+                matchedFilter: 'domain:ads status:blocked',
+                timestamp: new Date().toISOString(),
+                profile: getCurrentProfileId() || 'profile',
+                source: 'NDNS preview',
+                color: 15020400
+            };
+            try {
+                JSON.parse(renderWebhookTemplate(templateArea.value, sample));
+            } catch (error) {
+                showToast(`Template JSON invalid: ${error.message || 'parse failed'}`, true, 5000);
+                return;
+            }
+            webhookTemplate = {
+                preset: templateSelect.value,
+                template: templateArea.value === WEBHOOK_TEMPLATE_PRESETS[templateSelect.value] ? '' : templateArea.value
+            };
+            await storage.set({ [KEY_WEBHOOK_TEMPLATE]: webhookTemplate });
+            showToast('Webhook template saved.');
+        };
+
+        const resetTemplateBtn = document.createElement('button');
+        resetTemplateBtn.className = 'ndns-panel-button ndns-btn-sm danger';
+        resetTemplateBtn.textContent = 'Reset';
+        resetTemplateBtn.onclick = async () => {
+            templateArea.value = WEBHOOK_TEMPLATE_PRESETS[templateSelect.value] || WEBHOOK_TEMPLATE_PRESETS.generic;
+            webhookTemplate = { preset: templateSelect.value, template: '' };
+            await storage.set({ [KEY_WEBHOOK_TEMPLATE]: webhookTemplate });
+            showToast('Webhook template reset.');
+        };
+
+        templateActions.append(saveTemplateBtn, resetTemplateBtn);
+        container.append(templateSelect, templateArea, templateActions);
 
         const desc = document.createElement('div');
         desc.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 4px 0;';
@@ -7194,7 +7341,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.17';
+        footer.textContent = 'NDNS v3.4.18';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
