@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.20
+// @version      3.4.21
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -93,6 +93,7 @@ function addGlobalStyle(css) {
     const KEY_WEBHOOK_DELIVERIES = `${KEY_PREFIX}webhook_deliveries_v1`;
     const KEY_WEBHOOK_RATE_LIMIT = `${KEY_PREFIX}webhook_rate_limit_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
+    const KEY_PARENTAL_WEEKLY_SCHEDULE = `${KEY_PREFIX}parental_weekly_schedule_v1`;
 
     // --- HAGEZI CONFIG ---
     const HAGEZI_TLDS_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-aggressive.txt";
@@ -145,6 +146,10 @@ function addGlobalStyle(css) {
     let webhookRateLimitSeconds = 60;
     let showCnameChain = true;
     let scheduledLogTimer = null;
+    let parentalWeeklySchedule = { enabled: false, slots: [] };
+    let parentalWeeklyTimer = null;
+    let parentalWeeklyApplying = false;
+    let parentalWeeklyLastErrorAt = 0;
     // SLDs for proper root domain detection (unified list used everywhere)
     const SLDs = new Set(["co", "com", "org", "edu", "gov", "mil", "net", "ac", "or", "ne", "go", "ltd"]);
 
@@ -1617,6 +1622,21 @@ function addGlobalStyle(css) {
             margin-bottom: 4px; font-size: 12px;
         }
         .ndns-parental-toggle .toggle-label { display: flex; align-items: center; gap: 6px; }
+        .ndns-weekly-schedule { margin-top: 8px; overflow-x: auto; }
+        .ndns-weekly-schedule-grid {
+            display: grid; grid-template-columns: 42px repeat(24, 18px); gap: 2px;
+            align-items: center; min-width: 540px;
+        }
+        .ndns-weekly-schedule-label { font-size: 10px; color: var(--panel-text-secondary); }
+        .ndns-weekly-schedule-cell {
+            width: 18px; height: 18px; padding: 0; cursor: pointer;
+            border: 1px solid var(--panel-border); border-radius: 4px; background: var(--btn-bg);
+        }
+        .ndns-weekly-schedule-cell.active {
+            background: var(--success-color); border-color: var(--success-color);
+        }
+        .ndns-weekly-schedule-cell.now { outline: 2px solid var(--warning-color); outline-offset: 1px; }
+        .ndns-weekly-schedule-status { font-size: 10px; color: var(--panel-text-secondary); margin-top: 6px; }
 
         /* Scheduled Logs */
         .ndns-schedule-config { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
@@ -1878,7 +1898,8 @@ function addGlobalStyle(css) {
             [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
             [KEY_WEBHOOK_DELIVERIES]: [],
             [KEY_WEBHOOK_RATE_LIMIT]: 60,
-            [KEY_SHOW_CNAME_CHAIN]: true
+            [KEY_SHOW_CNAME_CHAIN]: true,
+            [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null }
         });
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
         hiddenDomains = new Set(values[KEY_HIDDEN_DOMAINS]);
@@ -1917,6 +1938,7 @@ function addGlobalStyle(css) {
         webhookDeliveries = Array.isArray(values[KEY_WEBHOOK_DELIVERIES]) ? values[KEY_WEBHOOK_DELIVERIES].slice(0, 5) : [];
         webhookRateLimitSeconds = Number(values[KEY_WEBHOOK_RATE_LIMIT] ?? 60);
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
+        parentalWeeklySchedule = normalizeParentalWeeklySchedule(values[KEY_PARENTAL_WEEKLY_SCHEDULE]);
     }
 
     async function makeApiRequest(method, endpoint, body = null, apiKey = NDNS_API_KEY, customUrl = null) {
@@ -6190,6 +6212,95 @@ function addGlobalStyle(css) {
         scheduledLogTimer = setInterval(checkAndDownload, 60000);
     }
 
+    // --- PARENTAL WEEKLY SCHEDULE ---
+    const PARENTAL_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    function createDefaultWeeklySlots() {
+        return Array.from({ length: 7 }, () => Array(24).fill(false));
+    }
+
+    function normalizeParentalWeeklySchedule(value = {}) {
+        value = value && typeof value === 'object' ? value : {};
+        const slots = createDefaultWeeklySlots();
+        (value.slots || []).forEach((daySlots, day) => {
+            if (!Array.isArray(daySlots) || day > 6) return;
+            daySlots.slice(0, 24).forEach((active, hour) => {
+                slots[day][hour] = !!active;
+            });
+        });
+
+        return {
+            enabled: !!value.enabled,
+            slots,
+            lastApplied: typeof value.lastApplied === 'boolean' ? value.lastApplied : null
+        };
+    }
+
+    function isParentalWeeklySlotActive(date = new Date()) {
+        parentalWeeklySchedule = normalizeParentalWeeklySchedule(parentalWeeklySchedule);
+        return !!parentalWeeklySchedule.slots[date.getDay()]?.[date.getHours()];
+    }
+
+    async function saveParentalWeeklySchedule() {
+        parentalWeeklySchedule = normalizeParentalWeeklySchedule(parentalWeeklySchedule);
+        await storage.set({ [KEY_PARENTAL_WEEKLY_SCHEDULE]: parentalWeeklySchedule });
+    }
+
+    function updateParentalWeeklyStatusElement() {
+        const status = document.getElementById('ndns-parental-weekly-status');
+        if (!status) return;
+        const active = isParentalWeeklySlotActive();
+        status.textContent = parentalWeeklySchedule.enabled
+            ? `Current slot: ${active ? 'Recreation on' : 'Recreation off'}`
+            : 'Weekly schedule disabled.';
+    }
+
+    async function applyParentalWeeklySchedule() {
+        if (!parentalWeeklySchedule.enabled || parentalWeeklyApplying || !NDNS_API_KEY) return;
+        const pid = getCurrentProfileId();
+        if (!pid) return;
+
+        parentalWeeklyApplying = true;
+        try {
+            const desired = isParentalWeeklySlotActive();
+            const config = await makeApiRequest('GET', `/profiles/${pid}/parentalControl`, null, NDNS_API_KEY);
+            const current = !!config.recreationTime?.enabled;
+            if (current !== desired) {
+                const recreationTime = { ...(config.recreationTime || {}), enabled: desired };
+                await makeApiRequest('PATCH', `/profiles/${pid}/parentalControl`, { recreationTime }, NDNS_API_KEY);
+            }
+
+            if (parentalWeeklySchedule.lastApplied !== desired) {
+                parentalWeeklySchedule.lastApplied = desired;
+                await saveParentalWeeklySchedule();
+            }
+            parentalWeeklyLastErrorAt = 0;
+            updateParentalWeeklyStatusElement();
+        } catch (e) {
+            const now = Date.now();
+            if (now - parentalWeeklyLastErrorAt > 300000) {
+                showToast(`Weekly schedule failed: ${e.message}`, true, 5000);
+                parentalWeeklyLastErrorAt = now;
+            }
+        } finally {
+            parentalWeeklyApplying = false;
+        }
+    }
+
+    function initParentalWeeklySchedule() {
+        if (parentalWeeklyTimer) {
+            clearInterval(parentalWeeklyTimer);
+            parentalWeeklyTimer = null;
+        }
+        if (!parentalWeeklySchedule.enabled) {
+            updateParentalWeeklyStatusElement();
+            return;
+        }
+
+        applyParentalWeeklySchedule();
+        parentalWeeklyTimer = setInterval(applyParentalWeeklySchedule, 60000);
+    }
+
     // --- PARENTAL CONTROL QUICK TOGGLES ---
     async function initParentalControls(container) {
         if (!NDNS_API_KEY) return;
@@ -6235,6 +6346,69 @@ function addGlobalStyle(css) {
             };
             recTimeToggle.appendChild(recToggle);
             container.appendChild(recTimeToggle);
+
+            const weeklyWrap = document.createElement('div');
+            weeklyWrap.className = 'ndns-weekly-schedule';
+
+            const weeklyHeader = document.createElement('div');
+            weeklyHeader.className = 'settings-control-row';
+            const weeklyLabel = document.createElement('span');
+            weeklyLabel.textContent = 'Weekly Schedule';
+            const weeklyToggle = document.createElement('div');
+            weeklyToggle.className = `ndns-toggle-switch ${parentalWeeklySchedule.enabled ? 'active' : ''}`;
+            weeklyToggle.onclick = async () => {
+                parentalWeeklySchedule.enabled = !parentalWeeklySchedule.enabled;
+                weeklyToggle.classList.toggle('active', parentalWeeklySchedule.enabled);
+                await saveParentalWeeklySchedule();
+                initParentalWeeklySchedule();
+                showToast(`Weekly schedule ${parentalWeeklySchedule.enabled ? 'enabled' : 'disabled'}.`);
+            };
+            weeklyHeader.append(weeklyLabel, weeklyToggle);
+
+            const grid = document.createElement('div');
+            grid.className = 'ndns-weekly-schedule-grid';
+            grid.appendChild(document.createElement('div'));
+            for (let hour = 0; hour < 24; hour++) {
+                const hourLabel = document.createElement('div');
+                hourLabel.className = 'ndns-weekly-schedule-label';
+                hourLabel.textContent = String(hour).padStart(2, '0');
+                grid.appendChild(hourLabel);
+            }
+
+            const now = new Date();
+            PARENTAL_WEEKDAYS.forEach((dayLabel, day) => {
+                const rowLabel = document.createElement('div');
+                rowLabel.className = 'ndns-weekly-schedule-label';
+                rowLabel.textContent = dayLabel;
+                grid.appendChild(rowLabel);
+
+                for (let hour = 0; hour < 24; hour++) {
+                    const cell = document.createElement('button');
+                    const active = !!parentalWeeklySchedule.slots[day]?.[hour];
+                    cell.type = 'button';
+                    cell.className = `ndns-weekly-schedule-cell ${active ? 'active' : ''} ${now.getDay() === day && now.getHours() === hour ? 'now' : ''}`.trim();
+                    cell.title = `${dayLabel} ${String(hour).padStart(2, '0')}:00 ${active ? 'on' : 'off'}`;
+                    cell.setAttribute('aria-label', cell.title);
+                    cell.onclick = async () => {
+                        const next = !parentalWeeklySchedule.slots[day][hour];
+                        parentalWeeklySchedule.slots[day][hour] = next;
+                        cell.classList.toggle('active', next);
+                        cell.title = `${dayLabel} ${String(hour).padStart(2, '0')}:00 ${next ? 'on' : 'off'}`;
+                        cell.setAttribute('aria-label', cell.title);
+                        await saveParentalWeeklySchedule();
+                        updateParentalWeeklyStatusElement();
+                        if (parentalWeeklySchedule.enabled) await applyParentalWeeklySchedule();
+                    };
+                    grid.appendChild(cell);
+                }
+            });
+
+            const weeklyStatus = document.createElement('div');
+            weeklyStatus.id = 'ndns-parental-weekly-status';
+            weeklyStatus.className = 'ndns-weekly-schedule-status';
+            weeklyWrap.append(weeklyHeader, grid, weeklyStatus);
+            container.appendChild(weeklyWrap);
+            updateParentalWeeklyStatusElement();
 
             categories.forEach(cat => {
                 const isActive = config[cat.key] || (config.services && config.services.some(s => s.id === cat.key && s.active));
@@ -6642,7 +6816,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.20',
+            source: 'NDNS v3.4.21',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7468,7 +7642,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.20';
+        footer.textContent = 'NDNS v3.4.21';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -8303,6 +8477,7 @@ function addGlobalStyle(css) {
             // NDNS v3.4: Scheduled log downloads
             initScheduledLogs();
             initHageziAutoSync();
+            initParentalWeeklySchedule();
         }
     }
 
