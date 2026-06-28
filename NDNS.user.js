@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.32
+// @version      3.4.33
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2562,6 +2562,119 @@ function addGlobalStyle(css) {
         return element;
     }
 
+    function getDialogFocusable(dialog) {
+        return Array.from(dialog.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+            .filter(element => !element.disabled && element.offsetParent !== null);
+    }
+
+    function focusDialog(overlay) {
+        const dialog = overlay.querySelector('[role="dialog"]');
+        if (!dialog) return;
+        overlay.ndnsPreviousFocus = document.activeElement;
+        const focusable = getDialogFocusable(dialog);
+        (focusable[0] || dialog).focus({ preventScroll: true });
+    }
+
+    function restoreDialogFocus(overlay) {
+        const previous = overlay?.ndnsPreviousFocus;
+        if (previous && typeof previous.focus === 'function' && document.contains(previous)) {
+            previous.focus({ preventScroll: true });
+        }
+        if (overlay) overlay.ndnsPreviousFocus = null;
+    }
+
+    function setupDialogAccessibility(overlay, dialog, label) {
+        if (!overlay || !dialog || overlay.dataset.ndnsDialogA11y === '1') return;
+        overlay.dataset.ndnsDialogA11y = '1';
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-label', label);
+        dialog.tabIndex = -1;
+        overlay.addEventListener('keydown', (event) => {
+            if (event.key !== 'Tab') return;
+            const focusable = getDialogFocusable(dialog);
+            if (focusable.length === 0) {
+                event.preventDefault();
+                dialog.focus({ preventScroll: true });
+                return;
+            }
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus({ preventScroll: true });
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus({ preventScroll: true });
+            }
+        });
+        const removalObserver = new MutationObserver(() => {
+            if (!document.body.contains(overlay)) {
+                restoreDialogFocus(overlay);
+                removalObserver.disconnect();
+            }
+        });
+        removalObserver.observe(document.body, { childList: true, subtree: true });
+        if (getComputedStyle(overlay).display !== 'none') setTimeout(() => focusDialog(overlay), 0);
+    }
+
+    function scanDialogAccessibility(root = document) {
+        const overlays = [];
+        if (root.matches?.('.ndns-profile-modal-overlay, .ndns-settings-modal-overlay, #ndns-onboarding-overlay')) overlays.push(root);
+        root.querySelectorAll?.('.ndns-profile-modal-overlay, .ndns-settings-modal-overlay, #ndns-onboarding-overlay').forEach(overlay => overlays.push(overlay));
+        overlays.forEach((overlay) => {
+            const dialog = overlay.querySelector('.ndns-profile-modal, .ndns-settings-modal-content, #ndns-onboarding-modal');
+            const label = dialog?.querySelector('h3,h2')?.textContent?.trim() || 'NDNS dialog';
+            setupDialogAccessibility(overlay, dialog, label);
+        });
+    }
+
+    function initAccessibilityObserver() {
+        scanDialogAccessibility();
+        scanSwitchAccessibility();
+        const observer = new MutationObserver((records) => {
+            records.forEach(record => record.addedNodes.forEach(node => {
+                if (node.nodeType !== 1) return;
+                scanDialogAccessibility(node);
+                scanSwitchAccessibility(node);
+            }));
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function inferSwitchLabel(element) {
+        const container = element.closest('.settings-control-row, .ndns-parental-toggle, .ndns-device-override-row, .ndns-webhook-row, .ndns-weekly-schedule');
+        if (!container) return element.getAttribute('aria-label') || 'Toggle setting';
+        const clone = container.cloneNode(true);
+        clone.querySelectorAll('.ndns-toggle-switch, button, input, select, textarea').forEach(control => control.remove());
+        return clone.textContent.trim().replace(/\s+/g, ' ') || element.getAttribute('aria-label') || 'Toggle setting';
+    }
+
+    function scanSwitchAccessibility(root = document) {
+        const switches = [];
+        if (root.matches?.('.ndns-toggle-switch')) switches.push(root);
+        root.querySelectorAll?.('.ndns-toggle-switch').forEach(element => switches.push(element));
+        switches.forEach(element => enhanceSwitch(element, inferSwitchLabel(element), element.classList.contains('active')));
+    }
+
+    function enhanceSwitch(element, label, checked = false) {
+        if (!element || element.dataset.ndnsSwitchA11y === '1') return element;
+        element.dataset.ndnsSwitchA11y = '1';
+        element.setAttribute('role', 'switch');
+        element.setAttribute('aria-label', label);
+        element.tabIndex = 0;
+        const update = () => element.setAttribute('aria-checked', element.classList.contains('active') ? 'true' : 'false');
+        element.classList.toggle('active', !!checked);
+        update();
+        element.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            element.click();
+        });
+        new MutationObserver(update).observe(element, { attributes: true, attributeFilter: ['class'] });
+        return element;
+    }
+
     function getDomainTag(domain) {
         const key = normalizeImportedDomain(domain);
         if (!key || !domainTags) return '';
@@ -2683,6 +2796,7 @@ function addGlobalStyle(css) {
             if (e.key === 'Escape') {
                 if (settingsModal && settingsModal.style.display !== 'none') {
                     settingsModal.style.display = 'none';
+                    restoreDialogFocus(settingsModal);
                 }
             }
         });
@@ -6162,6 +6276,8 @@ function addGlobalStyle(css) {
         if (!errors.length) return null;
         const warning = document.createElement('div');
         warning.className = 'ndns-analytics-warning';
+        warning.setAttribute('role', 'status');
+        warning.setAttribute('aria-live', 'polite');
 
         const body = document.createElement('div');
         body.appendChild(createSafeElement('strong', {
@@ -6194,6 +6310,8 @@ function addGlobalStyle(css) {
 
         const loading = document.createElement('div');
         loading.className = 'ndns-analytics-loading';
+        loading.setAttribute('role', 'status');
+        loading.setAttribute('aria-live', 'polite');
         loading.innerHTML = '<div class="spinner"></div><span>Loading analytics data...</span>';
         container.appendChild(loading);
 
@@ -8295,7 +8413,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.32',
+            source: 'NDNS v3.4.33',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8551,7 +8669,11 @@ function addGlobalStyle(css) {
     function buildSettingsModal() {
         const overlay = document.createElement('div');
         overlay.className = 'ndns-settings-modal-overlay';
-        overlay.onclick = (e) => { if (e.target === overlay) overlay.style.display = 'none'; };
+        const closeSettingsModal = () => {
+            overlay.style.display = 'none';
+            restoreDialogFocus(overlay);
+        };
+        overlay.onclick = (e) => { if (e.target === overlay) closeSettingsModal(); };
 
         const content = document.createElement('div');
         content.className = 'ndns-settings-modal-content';
@@ -8565,7 +8687,9 @@ function addGlobalStyle(css) {
         `;
         content.appendChild(header);
         content.innerHTML += `<button class="ndns-settings-close-btn">&times;</button>`;
-        content.querySelector('.ndns-settings-close-btn').onclick = () => overlay.style.display = 'none';
+        const closeButton = content.querySelector('.ndns-settings-close-btn');
+        closeButton.setAttribute('aria-label', 'Close settings');
+        closeButton.onclick = closeSettingsModal;
 
         // Create scrollable body container
         const modalBody = document.createElement('div');
@@ -9130,7 +9254,12 @@ function addGlobalStyle(css) {
         settingsButton = document.createElement('button');
         settingsButton.title = 'Settings';
         settingsButton.appendChild(icons.settings.cloneNode(true));
-        settingsButton.onclick = () => { if (settingsModal) settingsModal.style.display = 'flex'; };
+        settingsButton.onclick = () => {
+            if (!settingsModal) return;
+            settingsModal.style.display = 'flex';
+            scanDialogAccessibility(settingsModal);
+            focusDialog(settingsModal);
+        };
 
         togglePosButton = document.createElement('button');
         togglePosButton.onclick = async () => {
@@ -9277,7 +9406,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.32';
+        footer.textContent = 'NDNS v3.4.33';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -9990,6 +10119,7 @@ function addGlobalStyle(css) {
         applyThemeStudioCss(themeStudioCss);
         applyListPageTheme();
         setupEscapeHandler();
+        initAccessibilityObserver();
         if (storageDoctorReport?.repairedCount > 0) {
             setTimeout(() => showToast(formatStorageDoctorMessage(storageDoctorReport), true, 7000), 600);
         }
@@ -10030,7 +10160,11 @@ function addGlobalStyle(css) {
             if (sessionStorage.getItem('ndns_reopen_settings')) {
                 sessionStorage.removeItem('ndns_reopen_settings');
                 setTimeout(() => {
-                    if (settingsModal) settingsModal.style.display = 'flex';
+                    if (settingsModal) {
+                        settingsModal.style.display = 'flex';
+                        scanDialogAccessibility(settingsModal);
+                        focusDialog(settingsModal);
+                    }
                 }, 500);
             }
 
