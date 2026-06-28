@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.31
+// @version      3.4.32
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1480,6 +1480,19 @@ function addGlobalStyle(css) {
             width: 28px; height: 28px; border: 3px solid var(--btn-border);
             border-top-color: var(--accent-color); border-radius: 50%;
             animation: ndns-spin 0.8s linear infinite; margin-right: 12px;
+        }
+        .ndns-analytics-warning {
+            display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+            padding: 12px 14px; margin: 0 0 16px; border-radius: 10px;
+            border: 1px solid color-mix(in srgb, var(--warning-color) 55%, var(--panel-border));
+            background: color-mix(in srgb, var(--warning-color) 14%, var(--section-bg));
+            color: var(--panel-text); font-size: 12px;
+        }
+        .ndns-analytics-warning strong { display: block; margin-bottom: 4px; }
+        .ndns-analytics-warning ul { margin: 4px 0 0 16px; padding: 0; color: var(--panel-text-secondary); }
+        .ndns-analytics-warning button {
+            flex: 0 0 auto; padding: 6px 10px; border-radius: 8px; font-size: 11px; font-weight: 700;
+            background: var(--btn-bg); color: var(--panel-text); border: 1px solid var(--btn-border); cursor: pointer;
         }
         @keyframes ndns-spin { to { transform: rotate(360deg); } }
 
@@ -5859,20 +5872,42 @@ function addGlobalStyle(css) {
         }
     }
 
-    function buildAnalyticsSafeApi(profileId) {
+    function formatAnalyticsErrorMessage(err) {
+        return String(err?.message || err || 'Unknown error');
+    }
+
+    function buildAnalyticsSafeApi(profile, errors = []) {
+        const profileId = typeof profile === 'object' ? profile.id : profile;
+        const profileName = typeof profile === 'object' ? profile.name : profileId;
         return (endpoint, params = {}) => {
             const apiEndpoint = buildAnalyticsEndpoint(endpoint, params);
             return makeApiRequest('GET', `/profiles/${profileId}/analytics/${apiEndpoint}`, null, NDNS_API_KEY).catch((err) => {
-                console.warn(`[NDNS] Analytics API failed for ${profileId}/${apiEndpoint}:`, err?.message || err);
+                const message = formatAnalyticsErrorMessage(err);
+                errors.push({
+                    type: 'endpoint',
+                    profileId,
+                    profileName,
+                    endpoint: apiEndpoint,
+                    message
+                });
+                console.warn(`[NDNS] Analytics API failed for ${profileId}/${apiEndpoint}:`, message);
                 return null;
             });
         };
     }
 
-    async function loadAnalyticsProfiles(currentPid) {
+    async function loadAnalyticsProfiles(currentPid, errors = []) {
         if (analyticsScopeKey !== 'all') return [{ id: currentPid, name: 'Current Profile' }];
         const profiles = await makeApiRequest('GET', '/profiles', null, NDNS_API_KEY).catch((err) => {
-            console.warn('[NDNS] Profile list failed:', err?.message || err);
+            const message = formatAnalyticsErrorMessage(err);
+            errors.push({
+                type: 'profile-list',
+                profileId: currentPid,
+                profileName: 'Current Profile',
+                endpoint: '/profiles',
+                message
+            });
+            console.warn('[NDNS] Profile list failed:', message);
             return null;
         });
         const profileList = (profiles?.data || profiles || [])
@@ -5883,10 +5918,19 @@ function addGlobalStyle(css) {
     }
 
     async function fetchAnalyticsPayload(profile, windowConfig, rangeParams) {
-        const safeApi = buildAnalyticsSafeApi(profile.id);
+        const errors = [];
+        const safeApi = buildAnalyticsSafeApi(profile, errors);
         const withRange = (params = {}) => ({ ...rangeParams, ...params });
         const seriesPromise = windowConfig.bucketCount ? fetchAnalyticsStatusSeries(safeApi, windowConfig).catch((err) => {
-            console.warn(`[NDNS] Analytics rollup failed for ${profile.id}:`, err?.message || err);
+            const message = formatAnalyticsErrorMessage(err);
+            errors.push({
+                type: 'rollup',
+                profileId: profile.id,
+                profileName: profile.name,
+                endpoint: 'status rollup',
+                message
+            });
+            console.warn(`[NDNS] Analytics rollup failed for ${profile.id}:`, message);
             return null;
         }) : Promise.resolve([]);
 
@@ -5917,7 +5961,8 @@ function addGlobalStyle(css) {
             ipVersions: normalizeAnalyticsData(ipVersionsData),
             destinations: normalizeAnalyticsData(destinationsData),
             devices: normalizeAnalyticsData(devicesData),
-            statusSeries: statusSeries || []
+            statusSeries: statusSeries || [],
+            errors
         };
     }
 
@@ -5962,8 +6007,10 @@ function addGlobalStyle(css) {
         }).sort((a, b) => b.total - a.total);
     }
 
-    function mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, scopeKey) {
+    function mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, scopeKey, errors = []) {
         const profileSummaries = buildProfileSummaries(payloads);
+        const payloadErrors = payloads.flatMap(payload => payload.errors || []);
+        const allErrors = [...errors, ...payloadErrors];
         return {
             window: {
                 key: windowConfig.key,
@@ -5974,9 +6021,11 @@ function addGlobalStyle(css) {
             scope: {
                 key: scopeKey,
                 label: scopeKey === 'all' ? 'All Profiles' : 'Current Profile',
-                profileCount: payloads.length
+                profileCount: payloads.length,
+                errorCount: allErrors.length
             },
             profileSummaries,
+            errors: allErrors,
             domains: mergeAnalyticsField(payloads, 'domains'),
             blocked: mergeAnalyticsField(payloads, 'blocked'),
             status: mergeAnalyticsField(payloads, 'status'),
@@ -6108,6 +6157,37 @@ function addGlobalStyle(css) {
         return header;
     }
 
+    function buildAnalyticsWarning(cache, retryHandler) {
+        const errors = cache?.errors || [];
+        if (!errors.length) return null;
+        const warning = document.createElement('div');
+        warning.className = 'ndns-analytics-warning';
+
+        const body = document.createElement('div');
+        body.appendChild(createSafeElement('strong', {
+            text: `Partial analytics data: ${errors.length} request${errors.length === 1 ? '' : 's'} failed`
+        }));
+        body.appendChild(createSafeElement('div', {
+            text: 'Showing all data that loaded successfully. Exports include these errors.'
+        }));
+        const list = document.createElement('ul');
+        errors.slice(0, 5).forEach((error) => {
+            list.appendChild(createSafeElement('li', {
+                text: `${error.profileName || error.profileId || 'Profile'} / ${error.endpoint || error.type}: ${error.message}`
+            }));
+        });
+        if (errors.length > 5) {
+            list.appendChild(createSafeElement('li', { text: `${errors.length - 5} more errors included in exports.` }));
+        }
+        body.appendChild(list);
+
+        const retryBtn = document.createElement('button');
+        retryBtn.textContent = 'Retry Analytics';
+        retryBtn.onclick = retryHandler;
+        warning.append(body, retryBtn);
+        return warning;
+    }
+
     async function renderAnalyticsDashboard(pid, container) {
         container.innerHTML = '';
         container.appendChild(buildAnalyticsHeader(pid, container));
@@ -6120,37 +6200,77 @@ function addGlobalStyle(css) {
         try {
             const windowConfig = getAnalyticsWindowConfig();
             const rangeParams = buildAnalyticsRangeParams(windowConfig);
-            const profiles = await loadAnalyticsProfiles(pid);
+            const analyticsErrors = [];
+            const profiles = await loadAnalyticsProfiles(pid, analyticsErrors);
 
             console.log('[NDNS] Fetching analytics range:', windowConfig.key, 'scope:', analyticsScopeKey, 'profiles:', profiles.length);
 
             const payloads = [];
             for (const profile of profiles) {
-                payloads.push(await fetchAnalyticsPayload(profile, windowConfig, rangeParams));
+                try {
+                    payloads.push(await fetchAnalyticsPayload(profile, windowConfig, rangeParams));
+                } catch (err) {
+                    const message = formatAnalyticsErrorMessage(err);
+                    analyticsErrors.push({
+                        type: 'profile',
+                        profileId: profile.id,
+                        profileName: profile.name,
+                        endpoint: 'profile analytics',
+                        message
+                    });
+                    console.warn(`[NDNS] Analytics profile failed for ${profile.id}:`, message);
+                }
             }
 
-            analyticsCache = mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, analyticsScopeKey);
+            if (payloads.length === 0) {
+                throw new Error(analyticsErrors.length ? analyticsErrors.map(error => error.message).join('; ') : 'No analytics profiles loaded');
+            }
+
+            analyticsCache = mergeAnalyticsPayloads(payloads, windowConfig, rangeParams, analyticsScopeKey, analyticsErrors);
 
             if (analyticsScopeKey === 'current' && payloads[0]) {
                 try {
-                    analyticsCache.deviceDrilldowns = await fetchDeviceDrilldowns(payloads[0].safeApi, payloads[0].devices, rangeParams);
+                    const safeApi = buildAnalyticsSafeApi(payloads[0].profile, analyticsCache.errors);
+                    analyticsCache.deviceDrilldowns = await fetchDeviceDrilldowns(safeApi, payloads[0].devices, rangeParams);
                 } catch (err) {
+                    analyticsCache.errors.push({
+                        type: 'device-drilldown',
+                        profileId: payloads[0].profile.id,
+                        profileName: payloads[0].profile.name,
+                        endpoint: 'device drill-down',
+                        message: formatAnalyticsErrorMessage(err)
+                    });
                     console.warn('[NDNS] Device drill-down failed:', err?.message || err);
                 }
             }
 
             if (analyticsScopeKey === 'current') {
                 try {
-                    analyticsCache.categorySpikes = await fetchBlockedCategorySpikes(payloads[0]?.safeApi || buildAnalyticsSafeApi(pid), windowConfig);
+                    const safeApi = buildAnalyticsSafeApi(payloads[0]?.profile || { id: pid, name: 'Current Profile' }, analyticsCache.errors);
+                    analyticsCache.categorySpikes = await fetchBlockedCategorySpikes(safeApi, windowConfig);
                     notifyBlockedCategorySpikes(pid, windowConfig.key, analyticsCache.categorySpikes);
                 } catch (err) {
+                    analyticsCache.errors.push({
+                        type: 'category-spikes',
+                        profileId: payloads[0]?.profile?.id || pid,
+                        profileName: payloads[0]?.profile?.name || 'Current Profile',
+                        endpoint: 'blocked category spikes',
+                        message: formatAnalyticsErrorMessage(err)
+                    });
                     console.warn('[NDNS] Category anomaly detection failed:', err?.message || err);
                 }
             }
+            analyticsCache.scope.errorCount = analyticsCache.errors.length;
 
             console.log('[NDNS] Analytics data loaded successfully');
 
             loading.remove();
+            const warning = buildAnalyticsWarning(analyticsCache, () => {
+                analyticsCache = null;
+                container.innerHTML = '';
+                renderAnalyticsDashboard(pid, container);
+            });
+            if (warning) container.appendChild(warning);
             buildDashboardContent(container, analyticsCache);
 
         } catch (e) {
@@ -6777,6 +6897,19 @@ function addGlobalStyle(css) {
                 ].join(','));
             });
         }
+        if (analyticsCache.errors?.length) {
+            sections.push('\n# Analytics Errors');
+            sections.push('Type,Profile,Profile ID,Endpoint,Message');
+            analyticsCache.errors.forEach((error) => {
+                sections.push([
+                    csvEscape(error.type || 'request'),
+                    csvEscape(error.profileName || ''),
+                    csvEscape(error.profileId || ''),
+                    csvEscape(error.endpoint || ''),
+                    csvEscape(error.message || '')
+                ].join(','));
+            });
+        }
         downloadFile(sections.join('\n'), `nextdns-analytics-${exportSlug}-${analyticsCache.window?.key || 'api'}.csv`, 'text/csv');
         showToast('Full analytics exported as CSV.');
     }
@@ -6859,6 +6992,16 @@ function addGlobalStyle(css) {
         ]);
     }
 
+    function buildAnalyticsErrorReportRows(errors) {
+        return (errors || []).map(error => [
+            error.type || 'request',
+            error.profileName || '',
+            error.profileId || '',
+            error.endpoint || '',
+            error.message || ''
+        ]);
+    }
+
     function buildAnalyticsReportHTML(pid) {
         const statusItems = resolveItems(analyticsCache.status);
         const summary = summarizeStatusItems(statusItems);
@@ -6873,6 +7016,7 @@ function addGlobalStyle(css) {
         const rollupRows = buildRollupReportRows(analyticsCache.statusSeries);
         const anomalyRows = buildAnomalyReportRows(analyticsCache.categorySpikes);
         const profileRows = buildProfileReportRows(analyticsCache.profileSummaries?.length > 1 ? analyticsCache.profileSummaries : []);
+        const errorRows = buildAnalyticsErrorReportRows(analyticsCache.errors);
 
         return `<!doctype html>
 <html>
@@ -6933,6 +7077,7 @@ function addGlobalStyle(css) {
     </section>
     ${buildReportTable('Historical Rollup', ['Period', 'Total', 'Allowed', 'Blocked', 'Blocked %'], rollupRows)}
     ${buildReportTable('Merged Profiles', ['Profile', 'ID', 'Total', 'Allowed', 'Blocked', 'Blocked %'], profileRows)}
+    ${buildReportTable('Analytics Errors', ['Type', 'Profile', 'Profile ID', 'Endpoint', 'Message'], errorRows)}
     ${buildReportTable('Blocked Category Spikes', ['Category', 'Current', 'Previous', 'Ratio', 'Change %'], anomalyRows)}
     ${buildReportTable('Top Queried Domains', ['Domain', 'Queries', 'Share'], topDomainRows)}
     ${buildReportTable('Top Blocked Domains', ['Domain', 'Queries', 'Share'], blockedRows)}
@@ -8150,7 +8295,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.31',
+            source: 'NDNS v3.4.32',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9132,7 +9277,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.31';
+        footer.textContent = 'NDNS v3.4.32';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
