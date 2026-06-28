@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.37-7f5af0?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.4.38-7f5af0?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptMonkey-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/github/license/SysAdminDoc/NDNS?style=flat-square" alt="License">
 </p>
@@ -28,7 +28,7 @@ NDNS transforms the NextDNS dashboard at [my.nextdns.io](https://my.nextdns.io) 
 
 | Category | Details |
 | --- | --- |
-| **Floating Control Panel** | Draggable, resizable, persistent position. Mobile bottom-sheet layout. Quick navigation, domain filters, log controls, action buttons, and accessible modal/switch semantics. |
+| **Floating Control Panel** | Draggable, resizable, persistent position. Mobile bottom-sheet layout. Quick navigation, browser-side NextDNS verification, domain filters, log controls, action buttons, and accessible modal/switch semantics. |
 | **Analytics Dashboard** | Replaces the default analytics page with custom API-driven views: stat cards, current/all-profile aggregation with partial-failure warnings and retry, 90-day / 1-year historical rollups, blocked-category spike alerts, per-device app drill-downs, ring charts (status, DNSSEC, encryption, protocols, IP versions), bar charts (top domains, blocked domains, devices), data tables, and CSV/JSON/PDF export. |
 | **Log Enhancements** | Filter by Allowed / Blocked / Cached. Hide specific domains. Compact mode. Auto-refresh with configurable interval. Real-time log counters. Opt-in offline cache privacy controls with TTL, purge, and export boundaries. |
 | **Domain Management** | One-click allow/deny from logs. Domain-of-the-day review picker from loaded queries. 10-step undo stack for allow/deny actions. Bulk allowlist/denylist import. Wildcard/regex builder with recent-log preview. Protected domain tags for local curation during HaGeZi sync. Bulk delete tools with progress tracking. Domain action history. CNAME chain display. |

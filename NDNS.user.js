@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.37
+// @version      3.4.38
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -159,6 +159,7 @@ function addGlobalStyle(css) {
     const API_RETRY_BASE_DELAY_MS = 600;
     const API_RETRY_MAX_DELAY_MS = 10000;
     const NON_RETRYABLE_WRITE_METHODS = new Set(['POST']);
+    const NEXTDNS_TEST_URL = 'https://test.nextdns.io';
     const THEME_STUDIO_MAX_CSS_BYTES = 20 * 1024;
     const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
     const OFFLINE_LOG_CACHE_DB_NAME = `${KEY_PREFIX}offline_logs_v1`;
@@ -750,6 +751,46 @@ function addGlobalStyle(css) {
         }
         .ndns-stats-value.blocked { color: var(--danger-color); }
         .ndns-stats-value.allowed { color: var(--success-color); }
+        .ndns-doh-section {
+            gap: 8px;
+        }
+        .ndns-doh-status-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+        }
+        .ndns-doh-status {
+            min-width: 0;
+        }
+        .ndns-doh-value {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-width: 0;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .ndns-doh-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex: 0 0 8px;
+            background: var(--panel-text-secondary);
+        }
+        .ndns-doh-dot.ok { background: var(--success-color); }
+        .ndns-doh-dot.warning { background: var(--warning-color); }
+        .ndns-doh-dot.error { background: var(--danger-color); }
+        .ndns-doh-detail {
+            margin-top: 2px;
+            color: var(--panel-text-secondary);
+            font-size: 10px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .ndns-doh-refresh {
+            flex: 0 0 auto;
+        }
 
         /* Dividers */
         .ndns-divider {
@@ -2570,6 +2611,139 @@ function addGlobalStyle(css) {
             responseHeaders: response.responseHeaders || '',
             ndnsAttempts: attempts
         });
+    }
+
+    function parseNextDnsTestResponse(response) {
+        if (response?.response && typeof response.response === 'object') return response.response;
+        if (typeof response?.responseText === 'string' && response.responseText.trim()) {
+            return JSON.parse(response.responseText);
+        }
+        return {};
+    }
+
+    async function fetchNextDnsVerificationStatus() {
+        const response = await gmXmlHttpRequestWithRetry({
+            method: 'GET',
+            url: `${NEXTDNS_TEST_URL}?ndns=${Date.now()}`,
+            responseType: 'json',
+            timeout: 10000
+        }, { retries: 1 });
+
+        if (response.status < 200 || response.status >= 300) {
+            throw createRequestError(`${response.status}: ${response.statusText || 'NextDNS test failed'}`, {
+                status: response.status,
+                statusText: response.statusText,
+                responseHeaders: response.responseHeaders || ''
+            });
+        }
+
+        return parseNextDnsTestResponse(response);
+    }
+
+    function formatProtocolLabel(protocol) {
+        const normalized = String(protocol || '').trim();
+        if (!normalized) return '';
+        const upper = normalized.toUpperCase();
+        if (upper === 'DOH') return 'DoH';
+        if (upper === 'DOT') return 'DoT';
+        if (upper === 'UDP' || upper === 'TCP') return upper;
+        return normalized;
+    }
+
+    function buildNextDnsVerificationView(payload = {}) {
+        const status = String(payload.status || '').toLowerCase();
+        const profile = String(payload.profile || payload.profileId || '').trim();
+        const currentProfile = String(getCurrentProfileId() || '').trim();
+        const protocol = formatProtocolLabel(payload.protocol);
+        const resolver = payload.resolver || payload.srcIP || payload.destIP || '';
+        const details = [protocol, profile ? `profile ${profile}` : '', payload.server || resolver]
+            .filter(Boolean)
+            .join(' / ');
+
+        if (status === 'ok') {
+            if (currentProfile && profile && profile !== currentProfile) {
+                return {
+                    level: 'warning',
+                    label: 'Other profile',
+                    detail: details || 'NextDNS is active, but not for the open dashboard profile.'
+                };
+            }
+            return {
+                level: 'ok',
+                label: 'Verified',
+                detail: details || 'NextDNS is active for this browser.'
+            };
+        }
+
+        if (status === 'unconfigured') {
+            return {
+                level: 'warning',
+                label: 'Not active',
+                detail: resolver ? `Resolver ${resolver} is not mapped to this profile.` : 'This browser is not using a configured NextDNS resolver.'
+            };
+        }
+
+        return {
+            level: status ? 'warning' : 'error',
+            label: status ? status.replace(/[-_]/g, ' ') : 'Unknown',
+            detail: details || 'NextDNS test returned an unexpected response.'
+        };
+    }
+
+    function buildNextDnsVerificationSection() {
+        const section = createSafeElement('div', {
+            id: 'ndns-section-doh-verification',
+            className: 'ndns-section ndns-doh-section',
+            attrs: { role: 'status', 'aria-live': 'polite' }
+        });
+
+        const row = createSafeElement('div', { className: 'ndns-doh-status-row' });
+        const statusWrap = createSafeElement('div', { className: 'ndns-doh-status' });
+        const value = createSafeElement('div', { className: 'ndns-doh-value' });
+        const dot = createSafeElement('span', { className: 'ndns-doh-dot' });
+        const label = createSafeElement('span', { text: 'Checking...' });
+        const detail = createSafeElement('div', {
+            className: 'ndns-doh-detail',
+            text: 'Verifying this browser with test.nextdns.io'
+        });
+        const refreshBtn = createSafeElement('button', {
+            className: 'ndns-panel-button ndns-btn-sm ndns-doh-refresh ndns-tooltip',
+            text: uiText('refresh'),
+            attrs: { type: 'button', 'aria-label': 'Refresh NextDNS verification' }
+        });
+        refreshBtn.dataset.tooltip = 'Check whether this browser is using NextDNS now';
+
+        value.append(dot, label);
+        statusWrap.append(value, detail);
+        row.append(statusWrap, refreshBtn);
+        section.append(row);
+
+        const render = (view) => {
+            dot.className = `ndns-doh-dot ${view.level}`;
+            label.textContent = view.label;
+            detail.textContent = view.detail;
+        };
+
+        const refresh = async () => {
+            refreshBtn.disabled = true;
+            render({ level: '', label: 'Checking...', detail: 'Verifying this browser with test.nextdns.io' });
+            try {
+                render(buildNextDnsVerificationView(await fetchNextDnsVerificationStatus()));
+            } catch (error) {
+                render({
+                    level: 'error',
+                    label: 'Unavailable',
+                    detail: error?.message || 'NextDNS verification request failed.'
+                });
+            } finally {
+                refreshBtn.disabled = false;
+            }
+        };
+
+        refreshBtn.onclick = refresh;
+        section.ndnsRefreshNextDnsVerification = refresh;
+        setTimeout(refresh, 250);
+        return section;
     }
 
     function getProfileID() {
@@ -8580,7 +8754,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.37',
+            source: 'NDNS v3.4.38',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9513,6 +9687,8 @@ function addGlobalStyle(css) {
         content.className = 'ndns-panel-content';
         panel.appendChild(content);
 
+        content.appendChild(buildNextDnsVerificationSection());
+
         // --- LOG ACTION BUTTONS (only on logs page) ---
         const logActionSection = document.createElement('div');
         logActionSection.id = 'ndns-section-logActions';
@@ -9642,7 +9818,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.37';
+        footer.textContent = 'NDNS v3.4.38';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
