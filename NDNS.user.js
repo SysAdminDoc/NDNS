@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.10
+// @version      3.4.11
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -61,6 +61,7 @@ function addGlobalStyle(css) {
     const KEY_API_KEY = `${KEY_PREFIX}api_key`;
     const KEY_PROFILE_ID = `${KEY_PREFIX}profile_id_v1`;
     const KEY_DOMAIN_ACTIONS = `${KEY_PREFIX}domain_actions_v1`;
+    const KEY_DOMAIN_UNDO_STACK = `${KEY_PREFIX}domain_undo_stack_v1`;
     const KEY_LIST_PAGE_THEME = `${KEY_PREFIX}list_page_theme_v1`;
     const KEY_HAGEZI_ADDED_TLDS = `${KEY_PREFIX}hagezi_added_tlds_v1`;
     const KEY_HAGEZI_ADDED_ALLOWLIST = `${KEY_PREFIX}hagezi_added_allowlist_v1`;
@@ -97,6 +98,7 @@ function addGlobalStyle(css) {
     let filters = {};
     let hiddenDomains = new Set();
     let domainActions = {};
+    let domainUndoStack = [];
     let autoRefreshInterval = null;
     let currentTheme = 'dark';
     let panelWidth = 240;
@@ -1830,6 +1832,7 @@ function addGlobalStyle(css) {
             [KEY_API_KEY]: null,
             [KEY_PROFILE_ID]: null,
             [KEY_DOMAIN_ACTIONS]: {},
+            [KEY_DOMAIN_UNDO_STACK]: [],
             [KEY_LIST_PAGE_THEME]: true,
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
@@ -1860,6 +1863,7 @@ function addGlobalStyle(css) {
         NDNS_API_KEY = values[KEY_API_KEY];
         globalProfileId = values[KEY_PROFILE_ID];
         domainActions = values[KEY_DOMAIN_ACTIONS];
+        domainUndoStack = Array.isArray(values[KEY_DOMAIN_UNDO_STACK]) ? values[KEY_DOMAIN_UNDO_STACK].slice(0, 10) : [];
         enableListPageTheme = values[KEY_LIST_PAGE_THEME];
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
@@ -2576,6 +2580,96 @@ function addGlobalStyle(css) {
         await storage.set({ [KEY_DOMAIN_ACTIONS]: domainActions });
     }
 
+    function domainModeToListType(mode) {
+        return mode === 'allow' || mode === 'allowlist' ? 'allowlist' : 'denylist';
+    }
+
+    function domainListTypeToMode(listType) {
+        return listType === 'allowlist' || listType === 'allow' ? 'allow' : 'deny';
+    }
+
+    function formatDomainUndoEntry(entry) {
+        if (!entry) return 'No domain actions';
+        const modeLabel = domainModeToListType(entry.mode).replace('list', ' list');
+        const actionLabel = entry.action === 'remove' ? 'Removed from' : 'Added to';
+        const when = entry.at ? new Date(entry.at).toLocaleString() : 'Unknown time';
+        return `${actionLabel} ${modeLabel}: ${entry.domain} (${when})`;
+    }
+
+    function updateDomainUndoButtonState(button = document.getElementById('ndns-domain-undo-btn')) {
+        if (!button) return;
+        const count = domainUndoStack.length;
+        button.textContent = count ? `Undo Domain Action (${count})` : 'Undo Domain Action';
+        button.disabled = count === 0;
+        button.title = count ? formatDomainUndoEntry(domainUndoStack[0]) : 'No domain actions to undo';
+    }
+
+    async function saveDomainUndoStack() {
+        domainUndoStack = domainUndoStack
+            .filter(entry => entry && entry.domain && entry.mode && entry.action)
+            .slice(0, 10);
+        await storage.set({ [KEY_DOMAIN_UNDO_STACK]: domainUndoStack });
+        updateDomainUndoButtonState();
+    }
+
+    async function pushDomainUndoAction(entry) {
+        const domain = normalizeImportedDomain(entry.domain);
+        if (!domain) return;
+        const mode = domainListTypeToMode(entry.mode || entry.listType);
+        domainUndoStack = [{
+            action: entry.action === 'remove' ? 'remove' : 'add',
+            domain,
+            mode,
+            at: new Date().toISOString()
+        }, ...domainUndoStack].slice(0, 10);
+        await saveDomainUndoStack();
+    }
+
+    async function performDomainUndo(entry) {
+        if (!entry) throw new Error('No domain action to undo.');
+        if (!NDNS_API_KEY) throw new Error('API Key not set.');
+        const profileId = getCurrentProfileId();
+        if (!profileId) throw new Error('Could not find Profile ID.');
+
+        const domain = normalizeImportedDomain(entry.domain);
+        if (!domain) throw new Error('Domain is empty.');
+        const mode = domainListTypeToMode(entry.mode);
+        const listType = domainModeToListType(mode);
+
+        if (entry.action === 'remove') {
+            await makeApiRequest('POST', `/profiles/${profileId}/${listType}`, { id: domain, active: true }, NDNS_API_KEY);
+            hiddenDomains.add(domain);
+            await storage.set({ [KEY_HIDDEN_DOMAINS]: [...hiddenDomains] });
+            const level = domain === extractRootDomain(domain) ? 'root' : 'sub';
+            await updateDomainAction(domain, mode, level);
+            return `${domain} restored to ${listType}.`;
+        }
+
+        await makeApiRequest('DELETE', `/profiles/${profileId}/${listType}/${domain}`, null, NDNS_API_KEY);
+        hiddenDomains.delete(domain);
+        await storage.set({ [KEY_HIDDEN_DOMAINS]: [...hiddenDomains] });
+        await updateDomainAction(domain, 'remove');
+        return `${domain} removed from ${listType}.`;
+    }
+
+    async function undoLatestDomainAction(statusEl = null) {
+        const entry = domainUndoStack[0];
+        if (!entry) {
+            showToast('No domain action to undo.', false, 1500);
+            return;
+        }
+
+        if (statusEl) statusEl.textContent = `Undoing: ${formatDomainUndoEntry(entry)}`;
+        const message = await performDomainUndo(entry);
+        domainUndoStack.shift();
+        await saveDomainUndoStack();
+        invalidateLogCache();
+        cleanLogs();
+        if (/\/denylist|\/allowlist/.test(location.href)) sessionStorage.setItem('ndns_needs_refresh', 'true');
+        showToast(message, false, 2500);
+        if (statusEl) statusEl.textContent = message;
+    }
+
     async function sendDomainViaApi(domain, mode = 'deny') {
         if (!NDNS_API_KEY) {
             showToast('API Key not set.', true);
@@ -2620,7 +2714,7 @@ function addGlobalStyle(css) {
             });
     }
 
-    async function addDomainToList(domain, mode = 'deny', profileId = getCurrentProfileId()) {
+    async function addDomainToList(domain, mode = 'deny', profileId = getCurrentProfileId(), options = {}) {
         if (!NDNS_API_KEY) throw new Error('API Key not set.');
         if (!profileId) throw new Error('Could not find Profile ID.');
         const domainToSend = normalizeImportedDomain(domain);
@@ -2631,7 +2725,85 @@ function addGlobalStyle(css) {
         await storage.set({ [KEY_HIDDEN_DOMAINS]: [...hiddenDomains] });
         const level = domainToSend === extractRootDomain(domainToSend) ? 'root' : 'sub';
         await updateDomainAction(domainToSend, mode, level);
+        if (options.trackUndo !== false) await pushDomainUndoAction({ action: 'add', domain: domainToSend, mode });
         return domainToSend;
+    }
+
+    function showDomainUndoHistory() {
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = document.createElement('h3');
+        title.textContent = 'Domain Undo Stack';
+
+        const help = document.createElement('p');
+        help.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;';
+        help.textContent = 'Latest 10 allow/deny actions. Undo applies the newest entry first.';
+
+        const historyList = document.createElement('div');
+        historyList.style.cssText = 'display:flex;flex-direction:column;gap:6px;max-height:240px;overflow:auto;margin:8px 0;';
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);min-height:18px;';
+
+        const buttonRow = document.createElement('div');
+        buttonRow.className = 'modal-actions';
+
+        const undoBtn = document.createElement('button');
+        undoBtn.className = 'ndns-panel-button';
+        undoBtn.textContent = 'Undo Latest';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button danger';
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => overlay.remove();
+
+        const renderHistory = () => {
+            historyList.textContent = '';
+            undoBtn.disabled = domainUndoStack.length === 0;
+            if (domainUndoStack.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);padding:8px;border:1px solid var(--panel-border);border-radius:8px;';
+                empty.textContent = 'No stored domain actions.';
+                historyList.appendChild(empty);
+                statusEl.textContent = 'Idle';
+                updateDomainUndoButtonState();
+                return;
+            }
+
+            domainUndoStack.forEach((entry, index) => {
+                const row = document.createElement('div');
+                row.style.cssText = 'font-size:12px;padding:8px;border:1px solid var(--panel-border);border-radius:8px;background:var(--section-bg);';
+                row.textContent = `${index + 1}. ${formatDomainUndoEntry(entry)}`;
+                historyList.appendChild(row);
+            });
+            statusEl.textContent = `${domainUndoStack.length}/10 actions stored.`;
+            updateDomainUndoButtonState();
+        };
+
+        undoBtn.onclick = async () => {
+            undoBtn.disabled = true;
+            try {
+                await undoLatestDomainAction(statusEl);
+                renderHistory();
+            } catch (error) {
+                statusEl.textContent = `Undo failed: ${error.message || 'Unknown error'}`;
+                showToast(statusEl.textContent, true, 5000);
+            } finally {
+                undoBtn.disabled = domainUndoStack.length === 0;
+            }
+        };
+
+        buttonRow.append(undoBtn, closeBtn);
+        modal.append(title, help, historyList, statusEl, buttonRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        renderHistory();
     }
 
     function showBulkDomainImport() {
@@ -2868,17 +3040,21 @@ function addGlobalStyle(css) {
         const pid = getCurrentProfileId();
         if (!pid) return showToast('Could not find Profile ID.', true);
 
-        const endpoint = `/profiles/${pid}/${listType}/${domain}`;
+        const domainToRemove = normalizeImportedDomain(domain);
+        if (!domainToRemove) return showToast('Domain is empty.', true);
+        const endpoint = `/profiles/${pid}/${listType}/${domainToRemove}`;
         try {
             await makeApiRequest('DELETE', endpoint, null, NDNS_API_KEY);
-            await updateDomainAction(domain, 'remove');
-            showToast(`${domain} removed from ${listType}.`);
+            await updateDomainAction(domainToRemove, 'remove');
+            await pushDomainUndoAction({ action: 'remove', domain: domainToRemove, mode: domainListTypeToMode(listType) });
+            showToast(`${domainToRemove} removed from ${listType}.`);
             invalidateLogCache();
             cleanLogs();
             if (/\/denylist|\/allowlist/.test(location.href)) {
                 document.querySelectorAll(".list-group-item").forEach(item => {
                     const domainEl = item.querySelector('.notranslate');
-                    if (domainEl && domainEl.textContent.trim() === domain) {
+                    const itemDomain = normalizeImportedDomain(domainEl?.dataset?.ndnsDomain || domainEl?.textContent || '');
+                    if (itemDomain === domainToRemove) {
                         item.style.transition = 'opacity 0.3s';
                         item.style.opacity = '0';
                         setTimeout(() => item.remove(), 300);
@@ -5597,7 +5773,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.10'
+                    source: 'NDNS v3.4.11'
                 })
             });
         } catch {}
@@ -5883,6 +6059,13 @@ function addGlobalStyle(css) {
         wildcardBuilderBtn.className = 'ndns-panel-button';
         wildcardBuilderBtn.onclick = showWildcardBuilder;
 
+        const domainUndoBtn = document.createElement('button');
+        domainUndoBtn.id = 'ndns-domain-undo-btn';
+        domainUndoBtn.className = 'ndns-panel-button';
+        domainUndoBtn.textContent = 'Undo Domain Action';
+        domainUndoBtn.onclick = showDomainUndoHistory;
+        updateDomainUndoButtonState(domainUndoBtn);
+
         const exportListBtn = document.createElement('button');
         exportListBtn.textContent = 'Export Hidden List';
         exportListBtn.className = 'ndns-panel-button';
@@ -5899,7 +6082,7 @@ function addGlobalStyle(css) {
             }
         };
 
-        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, wildcardBuilderBtn, importBtn, exportListBtn, clearBtn);
+        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, wildcardBuilderBtn, domainUndoBtn, importBtn, exportListBtn, clearBtn);
         dataSection.appendChild(dataControls);
         modalBody.appendChild(dataSection);
 
@@ -6250,7 +6433,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.10';
+        footer.textContent = 'NDNS v3.4.11';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
