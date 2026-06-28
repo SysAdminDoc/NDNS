@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.22
+// @version      3.4.23
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -1627,6 +1627,11 @@ function addGlobalStyle(css) {
             margin-bottom: 4px; font-size: 12px;
         }
         .ndns-parental-toggle .toggle-label { display: flex; align-items: center; gap: 6px; }
+        .ndns-parental-presets {
+            display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+            margin: 8px 0;
+        }
+        .ndns-parental-presets button { min-width: 0; white-space: normal; line-height: 1.15; }
         .ndns-weekly-schedule { margin-top: 8px; overflow-x: auto; }
         .ndns-weekly-schedule-grid {
             display: grid; grid-template-columns: 42px repeat(24, 18px); gap: 2px;
@@ -6726,6 +6731,35 @@ function addGlobalStyle(css) {
         return wrap;
     }
 
+    function buildParentalPresetControls(pid, presets, categorySwitches) {
+        const wrap = document.createElement('div');
+        wrap.className = 'ndns-parental-presets';
+
+        presets.forEach((preset) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ndns-panel-button ndns-btn-sm';
+            button.textContent = preset.label;
+            button.onclick = async () => {
+                button.disabled = true;
+                try {
+                    await makeApiRequest('PATCH', `/profiles/${pid}/parentalControl`, preset.values, NDNS_API_KEY);
+                    Object.entries(preset.values).forEach(([key, value]) => {
+                        categorySwitches.get(key)?.classList.toggle('active', !!value);
+                    });
+                    showToast(`${preset.label} applied.`);
+                } catch (e) {
+                    showToast(`Preset failed: ${e.message}`, true);
+                } finally {
+                    button.disabled = false;
+                }
+            };
+            wrap.appendChild(button);
+        });
+
+        return wrap;
+    }
+
     // --- PARENTAL CONTROL QUICK TOGGLES ---
     async function initParentalControls(container) {
         if (!NDNS_API_KEY) return;
@@ -6752,6 +6786,51 @@ function addGlobalStyle(css) {
                 { key: 'dating', label: 'Block Dating', icon: '💕' },
                 { key: 'socialNetworks', label: 'Block Social', icon: '👥' },
                 { key: 'porn', label: 'Block Adult', icon: '🔞' }
+            ];
+            const categorySwitches = new Map();
+            const categoryPresets = [
+                {
+                    label: 'Safe Mode',
+                    values: {
+                        youtube: true,
+                        safeSearch: true,
+                        websites: true,
+                        apps: true,
+                        games: true,
+                        gambling: true,
+                        dating: true,
+                        socialNetworks: true,
+                        porn: true
+                    }
+                },
+                {
+                    label: 'Work Mode',
+                    values: {
+                        youtube: true,
+                        safeSearch: true,
+                        websites: false,
+                        apps: false,
+                        games: true,
+                        gambling: true,
+                        dating: true,
+                        socialNetworks: true,
+                        porn: true
+                    }
+                },
+                {
+                    label: 'Chill Mode',
+                    values: {
+                        youtube: false,
+                        safeSearch: true,
+                        websites: false,
+                        apps: false,
+                        games: false,
+                        gambling: true,
+                        dating: true,
+                        socialNetworks: false,
+                        porn: true
+                    }
+                }
             ];
 
             // Recreation time toggle
@@ -6839,6 +6918,7 @@ function addGlobalStyle(css) {
             updateParentalWeeklyStatusElement();
 
             container.appendChild(buildParentalDeviceOverrideManager(pid, deviceOptions));
+            container.appendChild(buildParentalPresetControls(pid, categoryPresets, categorySwitches));
 
             categories.forEach(cat => {
                 const isActive = config[cat.key] || (config.services && config.services.some(s => s.id === cat.key && s.active));
@@ -6848,6 +6928,7 @@ function addGlobalStyle(css) {
 
                 const sw = document.createElement('div');
                 sw.className = `ndns-toggle-switch ${isActive ? 'active' : ''}`;
+                categorySwitches.set(cat.key, sw);
                 sw.onclick = async () => {
                     const newVal = !sw.classList.contains('active');
                     try {
@@ -7246,7 +7327,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.22',
+            source: 'NDNS v3.4.23',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8072,7 +8153,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.22';
+        footer.textContent = 'NDNS v3.4.23';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);

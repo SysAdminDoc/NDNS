@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.22-7f5af0?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.4.23-7f5af0?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptMonkey-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/github/license/SysAdminDoc/NDNS?style=flat-square" alt="License">
 </p>
@@ -33,7 +33,7 @@ NDNS transforms the NextDNS dashboard at [my.nextdns.io](https://my.nextdns.io) 
 | **Log Enhancements** | Filter by Allowed / Blocked / Cached. Hide specific domains. Compact mode. Auto-refresh with configurable interval. Real-time log counters. |
 | **Domain Management** | One-click allow/deny from logs. Domain-of-the-day review picker from loaded queries. 10-step undo stack for allow/deny actions. Bulk allowlist/denylist import. Wildcard/regex builder with recent-log preview. Protected domain tags for local curation during HaGeZi sync. Bulk delete tools with progress tracking. Domain action history. CNAME chain display. |
 | **Profile Tools** | Full profile import/export (JSON). Cross-profile config sync. DNS rewrite management from the settings modal. |
-| **Parental Controls** | Quick-toggle parental control categories, recreation time, a local weekly 7x24 heatmap schedule, and device-activity override schedules from the settings modal. |
+| **Parental Controls** | Quick-toggle parental control categories, Safe / Work / Chill bulk presets, recreation time, a local weekly 7x24 heatmap schedule, and device-activity override schedules from the settings modal. |
 | **HaGeZi Integration** | One-click sync of TLD blocklists and allowlists from HaGeZi's curated adblock lists, local hosts/AdBlock blocklist import, per-list upstream hashes, counts, diff views after updates, optional weekly auto-sync notifications, and allow/deny conflict resolution. |
 | **Webhook Alerts** | Send domain query events to Discord, Slack, or any webhook URL. Configurable filter expressions, editable Generic JSON / Discord / Slack payload templates, test sends, last-5 delivery logs, and duplicate-event rate limiting. |
 | **Theming** | Dark, Dark Blue, and Light themes. List page theme override. Ultra-condensed mode. Custom CSS injection. |
