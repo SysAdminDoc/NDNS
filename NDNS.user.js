@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.28
+// @version      3.4.29
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -94,6 +94,7 @@ function addGlobalStyle(css) {
     const KEY_WEBHOOK_TEMPLATE = `${KEY_PREFIX}webhook_template_v1`;
     const KEY_WEBHOOK_DELIVERIES = `${KEY_PREFIX}webhook_deliveries_v1`;
     const KEY_WEBHOOK_RATE_LIMIT = `${KEY_PREFIX}webhook_rate_limit_v1`;
+    const KEY_WEBHOOK_TRUST = `${KEY_PREFIX}webhook_trust_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
     const KEY_PARENTAL_WEEKLY_SCHEDULE = `${KEY_PREFIX}parental_weekly_schedule_v1`;
     const KEY_PARENTAL_DEVICE_OVERRIDES = `${KEY_PREFIX}parental_device_overrides_v1`;
@@ -155,6 +156,7 @@ function addGlobalStyle(css) {
     let webhookTemplate = { preset: 'generic', template: '' };
     let webhookDeliveries = [];
     let webhookRateLimitSeconds = 60;
+    let webhookTrust = { url: '', host: '', consent: false };
     let showCnameChain = true;
     let scheduledLogTimer = null;
     let parentalWeeklySchedule = { enabled: false, slots: [] };
@@ -2013,6 +2015,7 @@ function addGlobalStyle(css) {
             [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
             [KEY_WEBHOOK_DELIVERIES]: [],
             [KEY_WEBHOOK_RATE_LIMIT]: 60,
+            [KEY_WEBHOOK_TRUST]: { url: '', host: '', consent: false },
             [KEY_SHOW_CNAME_CHAIN]: true,
             [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null },
             [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null }
@@ -2055,6 +2058,7 @@ function addGlobalStyle(css) {
         webhookTemplate = { preset: 'generic', template: '', ...(values[KEY_WEBHOOK_TEMPLATE] || {}) };
         webhookDeliveries = Array.isArray(values[KEY_WEBHOOK_DELIVERIES]) ? values[KEY_WEBHOOK_DELIVERIES].slice(0, 5) : [];
         webhookRateLimitSeconds = Number(values[KEY_WEBHOOK_RATE_LIMIT] ?? 60);
+        webhookTrust = normalizeWebhookTrust(values[KEY_WEBHOOK_TRUST]);
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
         parentalWeeklySchedule = normalizeParentalWeeklySchedule(values[KEY_PARENTAL_WEEKLY_SCHEDULE]);
         parentalDeviceOverrides = normalizeParentalDeviceOverrides(values[KEY_PARENTAL_DEVICE_OVERRIDES]);
@@ -2096,6 +2100,15 @@ function addGlobalStyle(css) {
 
     function isRetryableStatus(status) {
         return status === 429 || (status >= 500 && status <= 599);
+    }
+
+    function isNextDnsApiUrl(url) {
+        try {
+            const parsed = new URL(url, 'https://api.nextdns.io');
+            return parsed.protocol === 'https:' && parsed.hostname === 'api.nextdns.io';
+        } catch {
+            return false;
+        }
     }
 
     function getRetryDelayMs(responseOrError, attempt) {
@@ -2156,12 +2169,14 @@ function addGlobalStyle(css) {
 
     async function makeApiRequest(method, endpoint, body = null, apiKey = NDNS_API_KEY, customUrl = null, options = {}) {
         const normalizedMethod = String(method || 'GET').toUpperCase();
-        const headers = { 'X-Api-Key': apiKey };
+        const requestUrl = customUrl || `https://api.nextdns.io${endpoint}`;
+        const headers = {};
+        if (apiKey && isNextDnsApiUrl(requestUrl)) headers['X-Api-Key'] = apiKey;
         if (body) headers['Content-Type'] = 'application/json;charset=utf-8';
 
         const response = await gmXmlHttpRequestWithRetry({
             method: normalizedMethod,
-            url: customUrl || `https://api.nextdns.io${endpoint}`,
+            url: requestUrl,
             headers,
             data: body ? JSON.stringify(body) : undefined,
             responseType: 'json',
@@ -7418,6 +7433,65 @@ function addGlobalStyle(css) {
 }`
     };
 
+    function normalizeWebhookTrust(value = {}) {
+        value = value && typeof value === 'object' ? value : {};
+        return {
+            url: String(value.url || ''),
+            host: String(value.host || ''),
+            consent: value.consent === true
+        };
+    }
+
+    function normalizeWebhookHost(hostname) {
+        return String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+    }
+
+    function isPrivateWebhookIpv4(hostname) {
+        const parts = normalizeWebhookHost(hostname).split('.');
+        if (parts.length !== 4 || parts.some(part => !/^\d+$/.test(part))) return false;
+        const nums = parts.map(Number);
+        if (nums.some(num => num < 0 || num > 255)) return false;
+        return nums[0] === 10 ||
+            nums[0] === 127 ||
+            (nums[0] === 172 && nums[1] >= 16 && nums[1] <= 31) ||
+            (nums[0] === 192 && nums[1] === 168) ||
+            (nums[0] === 169 && nums[1] === 254) ||
+            (nums[0] === 0 && nums[1] === 0 && nums[2] === 0 && nums[3] === 0);
+    }
+
+    function isPrivateWebhookIpv6(hostname) {
+        const host = normalizeWebhookHost(hostname);
+        return host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd');
+    }
+
+    function validateWebhookDestination(rawUrl) {
+        const input = String(rawUrl || '').trim();
+        if (!input) return { ok: false, reason: 'Webhook URL is empty.' };
+
+        let parsed;
+        try {
+            parsed = new URL(input);
+        } catch {
+            return { ok: false, reason: 'Webhook URL is invalid.' };
+        }
+
+        const host = normalizeWebhookHost(parsed.hostname);
+        if (parsed.protocol !== 'https:') return { ok: false, reason: 'Webhook URL must use HTTPS.' };
+        if (parsed.username || parsed.password) return { ok: false, reason: 'Webhook URL cannot include credentials.' };
+        if (!host) return { ok: false, reason: 'Webhook URL host is missing.' };
+        if (host === 'localhost' || host.endsWith('.local')) return { ok: false, reason: 'Local webhook hosts are blocked.' };
+        if (isPrivateWebhookIpv4(host) || isPrivateWebhookIpv6(host)) return { ok: false, reason: 'Private network webhook hosts are blocked.' };
+
+        return { ok: true, url: parsed.href, host };
+    }
+
+    function isWebhookDeliveryTrusted(destination = validateWebhookDestination(webhookUrl)) {
+        return destination.ok &&
+            webhookTrust.consent === true &&
+            webhookTrust.url === destination.url &&
+            webhookTrust.host === destination.host;
+    }
+
     function matchesWebhookPattern(pattern, value) {
         const target = String(value || '');
         if (!target) return false;
@@ -7566,10 +7640,19 @@ function addGlobalStyle(css) {
 
     function postWebhookPayload(payload, type = 'query') {
         if (!webhookUrl) return;
+        const destination = validateWebhookDestination(webhookUrl);
+        if (!destination.ok) {
+            recordWebhookDelivery({ type, ok: false, message: destination.reason });
+            return;
+        }
+        if (!isWebhookDeliveryTrusted(destination)) {
+            recordWebhookDelivery({ type, ok: false, message: `Delivery consent required for ${destination.host}` });
+            return;
+        }
         try {
             GM_xmlhttpRequest({
                 method: 'POST',
-                url: webhookUrl,
+                url: destination.url,
                 headers: { 'Content-Type': 'application/json' },
                 data: JSON.stringify(payload),
                 timeout: API_REQUEST_TIMEOUT_MS,
@@ -7609,7 +7692,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.28',
+            source: 'NDNS v3.4.29',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7629,11 +7712,67 @@ function addGlobalStyle(css) {
         urlInput.placeholder = 'Webhook URL (e.g., Discord/Slack webhook)';
         urlInput.value = webhookUrl;
         urlInput.onchange = async () => {
-            webhookUrl = urlInput.value.trim();
-            await storage.set({ [KEY_WEBHOOK_URL]: webhookUrl });
-            showToast('Webhook URL saved.');
+            const nextUrl = urlInput.value.trim();
+            if (!nextUrl) {
+                webhookUrl = '';
+                webhookTrust = { url: '', host: '', consent: false };
+                await storage.set({ [KEY_WEBHOOK_URL]: webhookUrl, [KEY_WEBHOOK_TRUST]: webhookTrust });
+                renderTrustState();
+                showToast('Webhook URL cleared.');
+                return;
+            }
+
+            const destination = validateWebhookDestination(nextUrl);
+            if (!destination.ok) {
+                renderTrustState(destination);
+                showToast(destination.reason, true, 5000);
+                return;
+            }
+
+            webhookUrl = destination.url;
+            webhookTrust = { url: destination.url, host: destination.host, consent: false };
+            urlInput.value = webhookUrl;
+            await storage.set({ [KEY_WEBHOOK_URL]: webhookUrl, [KEY_WEBHOOK_TRUST]: webhookTrust });
+            renderTrustState(destination);
+            showToast('Webhook URL saved. Enable delivery consent before sending.');
         };
-        container.appendChild(urlInput);
+
+        const trustStatus = document.createElement('div');
+        trustStatus.style.cssText = 'font-size:10px;color:var(--panel-text-secondary);margin:4px 0 6px;';
+
+        const trustRow = document.createElement('div');
+        trustRow.className = 'settings-control-row';
+        trustRow.innerHTML = '<span>Allow Webhook Delivery</span>';
+        const trustToggle = document.createElement('div');
+        trustToggle.className = 'ndns-toggle-switch';
+        const renderTrustState = (overrideDestination = null) => {
+            const destination = overrideDestination || validateWebhookDestination(webhookUrl);
+            const trusted = isWebhookDeliveryTrusted(destination);
+            trustToggle.classList.toggle('active', trusted);
+            if (!webhookUrl) {
+                trustStatus.textContent = 'No webhook destination configured.';
+            } else if (!destination.ok) {
+                trustStatus.textContent = destination.reason;
+            } else {
+                trustStatus.textContent = `Destination: ${destination.host}. Consent: ${trusted ? 'enabled' : 'disabled'}.`;
+            }
+        };
+        trustToggle.onclick = async () => {
+            const destination = validateWebhookDestination(webhookUrl);
+            if (!destination.ok) {
+                renderTrustState(destination);
+                showToast(destination.reason, true, 5000);
+                return;
+            }
+            const nextConsent = !isWebhookDeliveryTrusted(destination);
+            webhookTrust = { url: destination.url, host: destination.host, consent: nextConsent };
+            await storage.set({ [KEY_WEBHOOK_TRUST]: webhookTrust });
+            renderTrustState(destination);
+            showToast(`Webhook delivery ${nextConsent ? 'allowed' : 'paused'} for ${destination.host}.`);
+        };
+        trustRow.appendChild(trustToggle);
+        renderTrustState();
+        container.append(urlInput, trustStatus, trustRow);
 
         const templateDesc = document.createElement('div');
         templateDesc.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 6px 0 4px;';
@@ -7774,6 +7913,9 @@ function addGlobalStyle(css) {
         testBtn.textContent = 'Test Webhook';
         testBtn.onclick = () => {
             if (!webhookUrl) return showToast('Webhook URL required.', true);
+            const destination = validateWebhookDestination(webhookUrl);
+            if (!destination.ok) return showToast(destination.reason, true, 5000);
+            if (!isWebhookDeliveryTrusted(destination)) return showToast(`Enable delivery consent for ${destination.host} first.`, true, 5000);
             const sampleContext = {
                 domain: 'ads.example.com',
                 device: 'laptop',
@@ -8469,7 +8611,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.28';
+        footer.textContent = 'NDNS v3.4.29';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
