@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.23
+// @version      3.4.24
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -72,6 +72,7 @@ function addGlobalStyle(css) {
     // NEW KEYS for v2.0
     const KEY_ULTRA_CONDENSED = `${KEY_PREFIX}ultra_condensed_v1`;
     const KEY_CUSTOM_CSS_ENABLED = `${KEY_PREFIX}custom_css_enabled_v1`;
+    const KEY_THEME_STUDIO_CSS = `${KEY_PREFIX}theme_studio_css_v1`;
     // NEW KEYS for v2.5 (NDNS features)
     const KEY_DOMAIN_DESCRIPTIONS = `${KEY_PREFIX}domain_descriptions_v1`;
     const KEY_DOMAIN_TAGS = `${KEY_PREFIX}domain_tags_v1`;
@@ -125,6 +126,8 @@ function addGlobalStyle(css) {
     let isUltraCondensed = true;
     let customCssEnabled = true;
     let ultraCondensedStyleElement = null;
+    let themeStudioCss = '';
+    let themeStudioStyleElement = null;
     // NEW STATE for v2.5 (NDNS features)
     let domainDescriptions = {};
     let domainTags = {};
@@ -1632,6 +1635,14 @@ function addGlobalStyle(css) {
             margin: 8px 0;
         }
         .ndns-parental-presets button { min-width: 0; white-space: normal; line-height: 1.15; }
+        .ndns-theme-studio { margin-top: 8px; }
+        .ndns-theme-studio textarea {
+            width: 100%; min-height: 140px; resize: vertical; box-sizing: border-box;
+            padding: 8px; border-radius: 6px; border: 1px solid var(--input-border);
+            background: var(--input-bg); color: var(--input-text); font: 11px/1.45 monospace;
+        }
+        .ndns-theme-studio-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        .ndns-theme-studio-status { margin-top: 5px; font-size: 10px; color: var(--panel-text-secondary); }
         .ndns-weekly-schedule { margin-top: 8px; overflow-x: auto; }
         .ndns-weekly-schedule-grid {
             display: grid; grid-template-columns: 42px repeat(24, 18px); gap: 2px;
@@ -1920,6 +1931,7 @@ function addGlobalStyle(css) {
             [KEY_HAGEZI_AUTO_SYNC]: { enabled: false, lastRun: null },
             [KEY_ULTRA_CONDENSED]: true,
             [KEY_CUSTOM_CSS_ENABLED]: true,
+            [KEY_THEME_STUDIO_CSS]: '',
             // NDNS features
             [KEY_DOMAIN_DESCRIPTIONS]: {},
             [KEY_DOMAIN_TAGS]: {},
@@ -1960,6 +1972,7 @@ function addGlobalStyle(css) {
         hageziAutoSyncConfig = { enabled: false, lastRun: null, ...(values[KEY_HAGEZI_AUTO_SYNC] || {}) };
         isUltraCondensed = values[KEY_ULTRA_CONDENSED];
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
+        themeStudioCss = String(values[KEY_THEME_STUDIO_CSS] || '');
         // NDNS features
         domainDescriptions = values[KEY_DOMAIN_DESCRIPTIONS];
         domainTags = values[KEY_DOMAIN_TAGS];
@@ -4504,6 +4517,127 @@ function addGlobalStyle(css) {
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-ndns-theme', theme);
         currentTheme = theme;
+    }
+
+    function applyThemeStudioCss(css = themeStudioCss) {
+        if (themeStudioStyleElement) {
+            themeStudioStyleElement.remove();
+            themeStudioStyleElement = null;
+        }
+
+        themeStudioCss = String(css || '');
+        if (!themeStudioCss.trim()) return;
+
+        themeStudioStyleElement = document.createElement('style');
+        themeStudioStyleElement.id = 'ndns-theme-studio-css';
+        themeStudioStyleElement.textContent = themeStudioCss;
+        document.head.appendChild(themeStudioStyleElement);
+    }
+
+    function buildThemeStudioControls() {
+        const wrap = document.createElement('div');
+        wrap.className = 'ndns-theme-studio';
+
+        const header = document.createElement('div');
+        header.className = 'settings-control-row';
+        header.innerHTML = '<span>Theme Studio</span>';
+        wrap.appendChild(header);
+
+        const textarea = document.createElement('textarea');
+        textarea.value = themeStudioCss;
+        textarea.placeholder = ':root { --accent-color: #7f5af0; }\n.ndns-panel { box-shadow: 0 20px 60px rgba(0,0,0,0.4); }';
+        wrap.appendChild(textarea);
+
+        const actions = document.createElement('div');
+        actions.className = 'ndns-theme-studio-actions';
+
+        const status = document.createElement('div');
+        status.className = 'ndns-theme-studio-status';
+        status.textContent = themeStudioCss.trim() ? 'Saved CSS loaded.' : 'No custom theme CSS saved.';
+
+        let previewTimer = null;
+        textarea.oninput = () => {
+            clearTimeout(previewTimer);
+            previewTimer = setTimeout(() => {
+                applyThemeStudioCss(textarea.value);
+                status.textContent = 'Previewing unsaved CSS.';
+            }, 150);
+        };
+
+        const saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'ndns-panel-button ndns-btn-sm';
+        saveBtn.textContent = 'Save';
+        saveBtn.onclick = async () => {
+            applyThemeStudioCss(textarea.value);
+            await storage.set({ [KEY_THEME_STUDIO_CSS]: themeStudioCss });
+            status.textContent = 'Saved.';
+            showToast('Theme Studio CSS saved.');
+        };
+
+        const exportBtn = document.createElement('button');
+        exportBtn.type = 'button';
+        exportBtn.className = 'ndns-panel-button ndns-btn-sm';
+        exportBtn.textContent = 'Export';
+        exportBtn.onclick = () => {
+            const version = typeof GM_info !== 'undefined' ? (GM_info.script?.version || 'unknown') : 'unknown';
+            const payload = {
+                app: 'NDNS Theme Studio',
+                version,
+                exportedAt: new Date().toISOString(),
+                css: textarea.value
+            };
+            downloadFile(JSON.stringify(payload, null, 2), `ndns-theme-studio-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+            status.textContent = 'Exported.';
+        };
+
+        const importInput = document.createElement('input');
+        importInput.type = 'file';
+        importInput.accept = '.json,.css,application/json,text/css,text/plain';
+        importInput.style.display = 'none';
+        importInput.onchange = () => {
+            const file = importInput.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async () => {
+                const text = String(reader.result || '');
+                let css = text;
+                try {
+                    const parsed = JSON.parse(text);
+                    if (typeof parsed.css === 'string') css = parsed.css;
+                } catch {}
+                textarea.value = css;
+                applyThemeStudioCss(css);
+                await storage.set({ [KEY_THEME_STUDIO_CSS]: themeStudioCss });
+                status.textContent = 'Imported and saved.';
+                showToast('Theme Studio CSS imported.');
+                importInput.value = '';
+            };
+            reader.onerror = () => showToast('Theme import failed.', true);
+            reader.readAsText(file);
+        };
+
+        const importBtn = document.createElement('button');
+        importBtn.type = 'button';
+        importBtn.className = 'ndns-panel-button ndns-btn-sm';
+        importBtn.textContent = 'Import';
+        importBtn.onclick = () => importInput.click();
+
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'ndns-panel-button ndns-btn-sm danger';
+        clearBtn.textContent = 'Clear';
+        clearBtn.onclick = async () => {
+            textarea.value = '';
+            applyThemeStudioCss('');
+            await storage.set({ [KEY_THEME_STUDIO_CSS]: '' });
+            status.textContent = 'Cleared.';
+            showToast('Theme Studio CSS cleared.');
+        };
+
+        actions.append(saveBtn, exportBtn, importBtn, clearBtn, importInput);
+        wrap.append(actions, status);
+        return wrap;
     }
 
     function applyPanelWidth(width) {
@@ -7327,7 +7461,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.23',
+            source: 'NDNS v3.4.24',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -7668,6 +7802,7 @@ function addGlobalStyle(css) {
             appearControls.appendChild(row);
         });
 
+        appearControls.appendChild(buildThemeStudioControls());
         appearSection.appendChild(appearControls);
         modalBody.appendChild(appearSection);
 
@@ -8153,7 +8288,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.23';
+        footer.textContent = 'NDNS v3.4.24';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -8862,6 +8997,7 @@ function addGlobalStyle(css) {
         await initializeState();
         applyTheme(currentTheme);
         applyUltraCondensedMode(isUltraCondensed);
+        applyThemeStudioCss(themeStudioCss);
         applyListPageTheme();
         setupEscapeHandler();
 
