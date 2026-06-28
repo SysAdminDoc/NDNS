@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.14-7f5af0?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.4.15-7f5af0?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptMonkey-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/github/license/SysAdminDoc/NDNS?style=flat-square" alt="License">
 </p>
@@ -34,7 +34,7 @@ NDNS transforms the NextDNS dashboard at [my.nextdns.io](https://my.nextdns.io) 
 | **Domain Management** | One-click allow/deny from logs. Domain-of-the-day review picker from loaded queries. 10-step undo stack for allow/deny actions. Bulk allowlist/denylist import. Wildcard/regex builder with recent-log preview. Protected domain tags for local curation during HaGeZi sync. Bulk delete tools with progress tracking. Domain action history. CNAME chain display. |
 | **Profile Tools** | Full profile import/export (JSON). Cross-profile config sync. DNS rewrite management from the settings modal. |
 | **Parental Controls** | Quick-toggle parental control categories and recreation time directly from the settings modal. |
-| **HaGeZi Integration** | One-click sync of TLD blocklists and allowlists from HaGeZi's curated adblock lists, with per-list upstream hashes, counts, diff views after updates, and optional weekly auto-sync notifications. |
+| **HaGeZi Integration** | One-click sync of TLD blocklists and allowlists from HaGeZi's curated adblock lists, with per-list upstream hashes, counts, diff views after updates, optional weekly auto-sync notifications, and allow/deny conflict resolution. |
 | **Webhook Alerts** | Send domain query events to Discord, Slack, or any webhook URL. Configurable domain pattern matching. |
 | **Theming** | Dark, Dark Blue, and Light themes. List page theme override. Ultra-condensed mode. Custom CSS injection. |
 | **Scheduled Logs** | Automatic log downloads on a configurable schedule with desktop notifications. |

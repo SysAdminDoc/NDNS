@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.14
+// @version      3.4.15
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -3454,6 +3454,117 @@ function addGlobalStyle(css) {
         return Array.from(new Set(domains.map(normalizeImportedDomain).filter(Boolean)));
     }
 
+    async function fetchAllowDenyConflicts(profileId) {
+        const [allowResponse, denyResponse] = await Promise.all([
+            makeApiRequest('GET', `/profiles/${profileId}/allowlist`, null, NDNS_API_KEY),
+            makeApiRequest('GET', `/profiles/${profileId}/denylist`, null, NDNS_API_KEY)
+        ]);
+        const allowSet = new Set((allowResponse.data || []).map(item => normalizeImportedDomain(item.id)).filter(Boolean));
+        const denySet = new Set((denyResponse.data || []).map(item => normalizeImportedDomain(item.id)).filter(Boolean));
+        return [...allowSet].filter(domain => denySet.has(domain)).sort((a, b) => a.localeCompare(b));
+    }
+
+    function showConflictResolver() {
+        if (!NDNS_API_KEY) return showToast('API Key not set.', true);
+        const pid = getCurrentProfileId();
+        if (!pid) return showToast('Could not find Profile ID.', true);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.style.maxWidth = '760px';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = document.createElement('h3');
+        title.textContent = 'Allow/Deny Conflicts';
+
+        const help = document.createElement('p');
+        help.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;';
+        help.textContent = 'Domains found in both lists are ambiguous. Keep one side to remove the other list entry.';
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);min-height:18px;margin-bottom:8px;';
+        statusEl.textContent = 'Loading conflicts...';
+
+        const listEl = document.createElement('div');
+        listEl.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:340px;overflow:auto;';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button danger';
+        closeBtn.textContent = 'Close';
+        closeBtn.style.marginTop = '12px';
+        closeBtn.onclick = () => overlay.remove();
+
+        const resolveConflict = async (domain, keepMode, button) => {
+            const listToRemove = keepMode === 'allow' ? 'denylist' : 'allowlist';
+            button.disabled = true;
+            statusEl.textContent = `Resolving ${domain} by removing it from ${listToRemove}...`;
+            try {
+                await makeApiRequest('DELETE', `/profiles/${pid}/${listToRemove}/${domain}`, null, NDNS_API_KEY);
+                const level = domain === extractRootDomain(domain) ? 'root' : 'sub';
+                await updateDomainAction(domain, keepMode, level);
+                showToast(`${domain}: kept ${keepMode === 'allow' ? 'allowlist' : 'denylist'}.`, false, 2500);
+                await renderConflicts();
+            } catch (error) {
+                statusEl.textContent = `Resolve failed: ${error.message || 'Unknown error'}`;
+                showToast(statusEl.textContent, true, 5000);
+                button.disabled = false;
+            }
+        };
+
+        const renderConflicts = async () => {
+            listEl.textContent = '';
+            statusEl.textContent = 'Scanning allowlist and denylist...';
+            try {
+                const conflicts = await fetchAllowDenyConflicts(pid);
+                statusEl.textContent = conflicts.length
+                    ? `${conflicts.length} conflicts found.`
+                    : 'No allow/deny conflicts found.';
+
+                if (conflicts.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);padding:8px;border:1px solid var(--panel-border);border-radius:8px;';
+                    empty.textContent = 'Allowlist and denylist are consistent.';
+                    listEl.appendChild(empty);
+                    return;
+                }
+
+                conflicts.forEach((domain) => {
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;padding:8px;border:1px solid var(--panel-border);border-radius:8px;background:var(--section-bg);';
+
+                    const label = document.createElement('div');
+                    label.style.cssText = 'font-family:monospace;font-size:12px;word-break:break-all;';
+                    label.textContent = domain;
+
+                    const keepAllowBtn = document.createElement('button');
+                    keepAllowBtn.className = 'ndns-panel-button ndns-btn-sm';
+                    keepAllowBtn.textContent = 'Keep Allow';
+                    keepAllowBtn.onclick = () => resolveConflict(domain, 'allow', keepAllowBtn);
+
+                    const keepDenyBtn = document.createElement('button');
+                    keepDenyBtn.className = 'ndns-panel-button ndns-btn-sm danger';
+                    keepDenyBtn.textContent = 'Keep Deny';
+                    keepDenyBtn.onclick = () => resolveConflict(domain, 'deny', keepDenyBtn);
+
+                    row.append(label, keepAllowBtn, keepDenyBtn);
+                    listEl.appendChild(row);
+                });
+            } catch (error) {
+                statusEl.textContent = `Conflict scan failed: ${error.message || 'Unknown error'}`;
+                showToast(statusEl.textContent, true, 5000);
+            }
+        };
+
+        modal.append(title, help, statusEl, listEl, closeBtn);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        renderConflicts();
+    }
+
     async function removeDomainViaApi(domain, listType) {
         if (!NDNS_API_KEY) return showToast('API Key not set.', true);
         const pid = getCurrentProfileId();
@@ -6192,7 +6303,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.14'
+                    source: 'NDNS v3.4.15'
                 })
             });
         } catch {}
@@ -6553,6 +6664,12 @@ function addGlobalStyle(css) {
             hageziControls.appendChild(button);
         });
 
+        const conflictResolverBtn = document.createElement('button');
+        conflictResolverBtn.textContent = 'Resolve Allow/Deny Conflicts';
+        conflictResolverBtn.className = 'ndns-panel-button';
+        conflictResolverBtn.onclick = showConflictResolver;
+        hageziControls.appendChild(conflictResolverBtn);
+
         hageziControls.prepend(hageziAutoRow, hageziAutoStatus);
         hageziSection.append(hageziVersionStatus, hageziControls);
         modalBody.appendChild(hageziSection);
@@ -6884,7 +7001,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.14';
+        footer.textContent = 'NDNS v3.4.15';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
