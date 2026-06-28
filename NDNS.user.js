@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.9
+// @version      3.4.10
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -69,6 +69,7 @@ function addGlobalStyle(css) {
     const KEY_CUSTOM_CSS_ENABLED = `${KEY_PREFIX}custom_css_enabled_v1`;
     // NEW KEYS for v2.5 (NDNS features)
     const KEY_DOMAIN_DESCRIPTIONS = `${KEY_PREFIX}domain_descriptions_v1`;
+    const KEY_DOMAIN_TAGS = `${KEY_PREFIX}domain_tags_v1`;
     const KEY_LIST_SORT_AZ = `${KEY_PREFIX}list_sort_az_v1`;
     const KEY_LIST_SORT_TLD = `${KEY_PREFIX}list_sort_tld_v1`;
     const KEY_LIST_BOLD_ROOT = `${KEY_PREFIX}list_bold_root_v1`;
@@ -108,6 +109,7 @@ function addGlobalStyle(css) {
     let ultraCondensedStyleElement = null;
     // NEW STATE for v2.5 (NDNS features)
     let domainDescriptions = {};
+    let domainTags = {};
     let listSortAZ = false;
     let listSortTLD = false;
     let listBoldRoot = true;
@@ -1081,6 +1083,22 @@ function addGlobalStyle(css) {
         .ndns-description-input::placeholder { color: #888; font-style: italic; }
         .ndns-description-input:focus, .ndns-description-input.has-value { display: block !important; }
         .list-group-item:hover .ndns-description-input { display: block !important; }
+        .ndns-domain-meta-row {
+            display: none; align-items: center; gap: 6px; width: 100%; padding-left: 10px; margin-top: 2px;
+        }
+        .list-group-item:hover .ndns-domain-meta-row,
+        .ndns-domain-meta-row:focus-within,
+        .ndns-domain-meta-row.has-value {
+            display: flex !important;
+        }
+        .ndns-domain-meta-row .ndns-description-input {
+            display: block !important; flex: 1 1 auto; min-width: 140px; padding-left: 0; margin-top: 0;
+        }
+        .ndns-domain-tag-select {
+            flex: 0 0 120px; height: 22px; border: 1px solid var(--panel-border); border-radius: 6px;
+            background: var(--panel-bg); color: var(--panel-text); font-size: 11px; outline: none;
+        }
+        .ndns-domain-tag-select.has-value { border-color: var(--warning-color); color: var(--warning-color); }
 
         /* Log Counters */
         .ndns-log-counters {
@@ -1817,6 +1835,7 @@ function addGlobalStyle(css) {
             [KEY_CUSTOM_CSS_ENABLED]: true,
             // NDNS features
             [KEY_DOMAIN_DESCRIPTIONS]: {},
+            [KEY_DOMAIN_TAGS]: {},
             [KEY_LIST_SORT_AZ]: false,
             [KEY_LIST_SORT_TLD]: false,
             [KEY_LIST_BOLD_ROOT]: true,
@@ -1846,6 +1865,7 @@ function addGlobalStyle(css) {
         customCssEnabled = values[KEY_CUSTOM_CSS_ENABLED];
         // NDNS features
         domainDescriptions = values[KEY_DOMAIN_DESCRIPTIONS];
+        domainTags = values[KEY_DOMAIN_TAGS];
         listSortAZ = values[KEY_LIST_SORT_AZ];
         listSortTLD = values[KEY_LIST_SORT_TLD];
         listBoldRoot = values[KEY_LIST_BOLD_ROOT];
@@ -1923,6 +1943,20 @@ function addGlobalStyle(css) {
 
     function escapeAttr(str) {
         return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function getDomainTag(domain) {
+        const key = normalizeImportedDomain(domain);
+        if (!key || !domainTags) return '';
+        const tagValue = domainTags[key];
+        if (!tagValue) return '';
+        if (typeof tagValue === 'string') return tagValue;
+        return tagValue.tag || '';
+    }
+
+    function isProtectedDomainTag(domain) {
+        const tag = getDomainTag(domain);
+        return tag === 'protected' || tag === 'local';
     }
 
     function downloadFile(content, fileName, mimeType = 'text/plain') {
@@ -2133,23 +2167,50 @@ function addGlobalStyle(css) {
                     const existingAdded = (await storage.get({ [currentConfig.storageKey]: [] }))[currentConfig.storageKey];
                     const newlyAdded = new Set([...existingAdded, ...itemsToAdd]);
                     await storage.set({ [currentConfig.storageKey]: [...newlyAdded] });
+                    if (listType === 'allowlist') {
+                        itemsToAdd.forEach((item) => {
+                            const domain = normalizeImportedDomain(item);
+                            if (domain && !domainTags[domain]) domainTags[domain] = 'hagezi';
+                        });
+                        await storage.set({ [KEY_DOMAIN_TAGS]: domainTags });
+                    }
                     showToast(`Successfully added ${itemsToAdd.length} entries.`, false);
                 }
 
             } else if (action === 'remove') {
-                const itemsToRemove = (await storage.get({ [currentConfig.storageKey]: [] }))[currentConfig.storageKey];
-                if (itemsToRemove.length === 0) {
+                const managedItems = (await storage.get({ [currentConfig.storageKey]: [] }))[currentConfig.storageKey];
+                const protectedItems = listType === 'allowlist' ? managedItems.filter(isProtectedDomainTag) : [];
+                const itemsToRemove = listType === 'allowlist'
+                    ? managedItems.filter(item => !isProtectedDomainTag(item))
+                    : managedItems;
+
+                if (managedItems.length === 0) {
                     showToast(`No managed ${currentConfig.name} entries found to remove.`, false);
+                } else if (itemsToRemove.length === 0) {
+                    await storage.set({ [currentConfig.storageKey]: protectedItems });
+                    showToast(`Skipped ${protectedItems.length} protected ${currentConfig.name} entries.`, false);
                 } else {
-                    const toast = showToast(`Removing ${itemsToRemove.length} entries from ${currentConfig.name}... 0%`, false, itemsToRemove.length * 600);
+                    const skipLabel = protectedItems.length ? ` (${protectedItems.length} protected skipped)` : '';
+                    const toast = showToast(`Removing ${itemsToRemove.length} entries from ${currentConfig.name}${skipLabel}... 0%`, false, itemsToRemove.length * 600);
                     for (let i = 0; i < itemsToRemove.length; i++) {
                         const item = itemsToRemove[i];
                         await makeApiRequest('DELETE', currentConfig.removeEndpoint(item));
                         toast.textContent = `Removing from ${currentConfig.name}... ${Math.round((i + 1) / itemsToRemove.length * 100)}%`;
                         await sleep();
                     }
-                    await storage.remove(currentConfig.storageKey);
-                    showToast(`Successfully removed ${itemsToRemove.length} entries.`, false);
+                    if (protectedItems.length) {
+                        await storage.set({ [currentConfig.storageKey]: protectedItems });
+                    } else {
+                        await storage.remove(currentConfig.storageKey);
+                    }
+                    if (listType === 'allowlist') {
+                        itemsToRemove.forEach((item) => {
+                            const domain = normalizeImportedDomain(item);
+                            if (domain && getDomainTag(domain) === 'hagezi') delete domainTags[domain];
+                        });
+                        await storage.set({ [KEY_DOMAIN_TAGS]: domainTags });
+                    }
+                    showToast(`Successfully removed ${itemsToRemove.length} entries${skipLabel}.`, false);
                 }
             }
 
@@ -5536,7 +5597,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.9'
+                    source: 'NDNS v3.4.10'
                 })
             });
         } catch {}
@@ -6189,7 +6250,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.9';
+        footer.textContent = 'NDNS v3.4.10';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -6381,9 +6442,11 @@ function addGlobalStyle(css) {
             if (!domainEl || domainEl.dataset.ndnsStyled) return;
             domainEl.dataset.ndnsStyled = 'true';
 
-            const fullDomain = domainEl.textContent.trim();
+            const fullDomain = domainEl.dataset.ndnsFullDomain || domainEl.textContent.trim();
             const hasWildcard = fullDomain.startsWith('*.');
             const cleanDomain = fullDomain.replace(/^\*\./, '');
+            domainEl.dataset.ndnsFullDomain = fullDomain;
+            domainEl.dataset.ndnsDomain = cleanDomain;
             const rootDomain = extractRootDomainFromFull(cleanDomain);
             const subdomain = cleanDomain.replace(rootDomain, '').replace(/\.$/, '');
 
@@ -6424,8 +6487,10 @@ function addGlobalStyle(css) {
             const header = items.shift(); // Keep first item (input row) at top
 
             items.sort((a, b) => {
-                const domainA = a.querySelector('.notranslate')?.textContent.toLowerCase().replace(/^\*\./, '') || '';
-                const domainB = b.querySelector('.notranslate')?.textContent.toLowerCase().replace(/^\*\./, '') || '';
+                const domainAEl = a.querySelector('.notranslate');
+                const domainBEl = b.querySelector('.notranslate');
+                const domainA = (domainAEl?.dataset.ndnsDomain || domainAEl?.textContent || '').toLowerCase().replace(/^\*\./, '');
+                const domainB = (domainBEl?.dataset.ndnsDomain || domainBEl?.textContent || '').toLowerCase().replace(/^\*\./, '');
 
                 const partsA = domainA.split('.');
                 const partsB = domainB.split('.');
@@ -6459,20 +6524,53 @@ function addGlobalStyle(css) {
             items.forEach(item => listGroup.appendChild(item));
         }
 
+        function getDomainFromItem(item) {
+            const domainEl = item.querySelector('.notranslate');
+            if (!domainEl) return '';
+            return normalizeImportedDomain(domainEl.dataset.ndnsDomain || domainEl.textContent.trim().replace(/^\*\./, ''));
+        }
+
+        function getOrCreateDomainMetaRow(item) {
+            let row = item.querySelector('.ndns-domain-meta-row');
+            if (row) return row;
+
+            const domainEl = item.querySelector('.notranslate');
+            if (!domainEl) return null;
+            const container = domainEl.closest('.d-flex') || domainEl.parentElement;
+            if (!container) return null;
+            row = document.createElement('div');
+            row.className = 'ndns-domain-meta-row';
+
+            const nestedContainer = container.querySelector('.d-flex');
+            if (nestedContainer) {
+                nestedContainer.appendChild(row);
+            } else {
+                container.appendChild(row);
+            }
+            return row;
+        }
+
+        function syncDomainMetaRowState(row) {
+            if (!row) return;
+            const hasDescription = !!row.querySelector('.ndns-description-input.has-value');
+            const hasTag = !!row.querySelector('.ndns-domain-tag-select.has-value');
+            row.classList.toggle('has-value', hasDescription || hasTag);
+        }
+
         // --- Helper: Add description input to domain item ---
         function addDescriptionInput(item) {
             if (item.querySelector('.ndns-description-input')) return;
 
-            const domainEl = item.querySelector('.notranslate');
-            if (!domainEl) return;
-
-            const domain = domainEl.textContent.trim().replace(/^\*\./, '');
-            const container = domainEl.closest('.d-flex') || domainEl.parentElement;
+            const domain = getDomainFromItem(item);
+            if (!domain) return;
+            const row = getOrCreateDomainMetaRow(item);
+            if (!row) return;
 
             const descInput = document.createElement('input');
             descInput.className = 'ndns-description-input';
             descInput.placeholder = 'Add description (Enter to save)';
-            descInput.value = domainDescriptions[domain] || '';
+            const legacyDomain = item.querySelector('.notranslate')?.textContent.trim().replace(/^\*\./, '') || '';
+            descInput.value = domainDescriptions[domain] || domainDescriptions[legacyDomain] || '';
             if (descInput.value) descInput.classList.add('has-value');
 
             descInput.onkeypress = async (e) => {
@@ -6486,6 +6584,7 @@ function addGlobalStyle(css) {
                     } else {
                         descInput.classList.remove('has-value');
                     }
+                    syncDomainMetaRowState(row);
                     showToast('Description saved!', false, 1500);
                 }
             };
@@ -6498,14 +6597,56 @@ function addGlobalStyle(css) {
                 } else {
                     descInput.classList.remove('has-value');
                 }
+                syncDomainMetaRowState(row);
             };
 
-            // Insert after the domain text
-            if (container.querySelector('.d-flex')) {
-                container.querySelector('.d-flex').appendChild(descInput);
-            } else {
-                container.appendChild(descInput);
+            row.appendChild(descInput);
+            syncDomainMetaRowState(row);
+        }
+
+        function addDomainTagEditor(item) {
+            if (item.querySelector('.ndns-domain-tag-select')) return;
+
+            const domain = getDomainFromItem(item);
+            if (!domain) return;
+            const row = getOrCreateDomainMetaRow(item);
+            if (!row) return;
+
+            const tagSelect = document.createElement('select');
+            tagSelect.className = 'ndns-domain-tag-select';
+            tagSelect.title = 'Domain tag';
+            [
+                { value: '', label: 'No tag' },
+                { value: 'protected', label: 'Local keep' },
+                { value: 'hagezi', label: 'HaGeZi' },
+                { value: 'watch', label: 'Review' }
+            ].forEach((optionDef) => {
+                const option = document.createElement('option');
+                option.value = optionDef.value;
+                option.textContent = optionDef.label;
+                tagSelect.appendChild(option);
+            });
+
+            const currentTag = getDomainTag(domain);
+            if ([...tagSelect.options].some(option => option.value === currentTag)) {
+                tagSelect.value = currentTag;
             }
+            tagSelect.classList.toggle('has-value', !!tagSelect.value);
+
+            tagSelect.onchange = async () => {
+                if (tagSelect.value) {
+                    domainTags[domain] = tagSelect.value;
+                } else {
+                    delete domainTags[domain];
+                }
+                tagSelect.classList.toggle('has-value', !!tagSelect.value);
+                syncDomainMetaRowState(row);
+                await storage.set({ [KEY_DOMAIN_TAGS]: domainTags });
+                showToast(tagSelect.value === 'protected' ? 'Domain protected from HaGeZi removal.' : 'Domain tag saved.', false, 1500);
+            };
+
+            row.appendChild(tagSelect);
+            syncDomainMetaRowState(row);
         }
 
         // --- Create Options Menu ---
@@ -6608,6 +6749,7 @@ function addGlobalStyle(css) {
 
                 // Add description input
                 addDescriptionInput(item);
+                addDomainTagEditor(item);
 
                 // Apply right align if enabled
                 if (listRightAlign) item.classList.add('ndns-right-align');
