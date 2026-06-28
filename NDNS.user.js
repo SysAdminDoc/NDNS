@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.34
+// @version      3.4.35
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -99,6 +99,7 @@ function addGlobalStyle(css) {
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
     const KEY_PARENTAL_WEEKLY_SCHEDULE = `${KEY_PREFIX}parental_weekly_schedule_v1`;
     const KEY_PARENTAL_DEVICE_OVERRIDES = `${KEY_PREFIX}parental_device_overrides_v1`;
+    const KEY_OFFLINE_LOG_CACHE_PRIVACY = `${KEY_PREFIX}offline_log_cache_privacy_v1`;
     const STORAGE_SCHEMA_VERSION = 1;
     const STORAGE_BACKUP_TYPE = 'ndns-settings';
     const defaultFilters = { hideList: false, hideBlocked: false, showOnlyWhitelisted: false, autoRefresh: false };
@@ -143,7 +144,8 @@ function addGlobalStyle(css) {
         [KEY_WEBHOOK_TRUST]: { url: '', host: '', consent: false },
         [KEY_SHOW_CNAME_CHAIN]: true,
         [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null },
-        [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null }
+        [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null },
+        [KEY_OFFLINE_LOG_CACHE_PRIVACY]: { enabled: false, ttlDays: 1, includeInBackups: false, lastPurged: null }
     };
     const STORAGE_BACKUP_EXCLUDED_KEYS = new Set([KEY_API_KEY]);
     const STORAGE_BACKUP_KEYS = Object.keys(STORAGE_DEFAULTS).filter(key => !STORAGE_BACKUP_EXCLUDED_KEYS.has(key));
@@ -159,6 +161,8 @@ function addGlobalStyle(css) {
     const NON_RETRYABLE_WRITE_METHODS = new Set(['POST']);
     const THEME_STUDIO_MAX_CSS_BYTES = 20 * 1024;
     const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
+    const OFFLINE_LOG_CACHE_DB_NAME = `${KEY_PREFIX}offline_logs_v1`;
+    const OFFLINE_LOG_CACHE_TTL_DAYS = [1, 7, 14, 30];
 
     // --- GLOBAL STATE ---
     let panel, lockButton, settingsModal, togglePosButton, settingsButton;
@@ -219,6 +223,7 @@ function addGlobalStyle(css) {
     let parentalDeviceOverrideApplying = false;
     let parentalDeviceOverrideLastErrorAt = 0;
     let storageDoctorReport = null;
+    let offlineLogCachePrivacy = { enabled: false, ttlDays: 1, includeInBackups: false, lastPurged: null };
     // SLDs for proper root domain detection (unified list used everywhere)
     const SLDs = new Set(["co", "com", "org", "edu", "gov", "mil", "net", "ac", "or", "ne", "go", "ltd"]);
 
@@ -2153,6 +2158,17 @@ function addGlobalStyle(css) {
             }));
     }
 
+    function normalizeOfflineLogCachePrivacy(value) {
+        const source = isPlainObject(value) ? value : {};
+        const ttlDays = Math.round(normalizeNumber(source.ttlDays, 1, 1, 30));
+        return {
+            enabled: normalizeBoolean(source.enabled, false),
+            ttlDays: OFFLINE_LOG_CACHE_TTL_DAYS.includes(ttlDays) ? ttlDays : 1,
+            includeInBackups: normalizeBoolean(source.includeInBackups, false),
+            lastPurged: normalizeTimestamp(source.lastPurged)
+        };
+    }
+
     function normalizeStorageValue(key, value) {
         const defaultValue = STORAGE_DEFAULTS[key];
         switch (key) {
@@ -2215,6 +2231,8 @@ function addGlobalStyle(css) {
                 return normalizeParentalWeeklySchedule(value);
             case KEY_PARENTAL_DEVICE_OVERRIDES:
                 return normalizeParentalDeviceOverrides(value);
+            case KEY_OFFLINE_LOG_CACHE_PRIVACY:
+                return normalizeOfflineLogCachePrivacy(value);
             default:
                 return cloneStorageValue(defaultValue);
         }
@@ -2326,6 +2344,38 @@ function addGlobalStyle(css) {
         setTimeout(() => location.reload(), 1200);
     }
 
+    function formatOfflineLogCachePrivacyStatus() {
+        const state = offlineLogCachePrivacy.enabled ? 'enabled' : 'off';
+        const purged = offlineLogCachePrivacy.lastPurged
+            ? ` Last purge: ${new Date(offlineLogCachePrivacy.lastPurged).toLocaleString()}.`
+            : '';
+        return `Offline log cache is ${state}. Cached DNS logs are local-only, profile-scoped, TTL ${offlineLogCachePrivacy.ttlDays} day(s), and excluded from normal settings backups. Future cache export is ${offlineLogCachePrivacy.includeInBackups ? 'allowed' : 'blocked'}.${purged}`;
+    }
+
+    function deleteOfflineLogCacheDatabase() {
+        return new Promise((resolve, reject) => {
+            if (!('indexedDB' in window)) {
+                resolve('IndexedDB unavailable');
+                return;
+            }
+            const request = indexedDB.deleteDatabase(OFFLINE_LOG_CACHE_DB_NAME);
+            request.onsuccess = () => resolve('deleted');
+            request.onblocked = () => resolve('blocked');
+            request.onerror = () => reject(request.error || new Error('IndexedDB delete failed'));
+        });
+    }
+
+    async function purgeOfflineLogCache(statusEl = null) {
+        const result = await deleteOfflineLogCacheDatabase();
+        offlineLogCachePrivacy = {
+            ...offlineLogCachePrivacy,
+            lastPurged: Date.now()
+        };
+        await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
+        if (statusEl) statusEl.textContent = formatOfflineLogCachePrivacyStatus();
+        showToast(result === 'blocked' ? 'Offline log cache purge is blocked by another open tab.' : 'Offline log cache purged.');
+    }
+
     async function initializeState() {
         storageDoctorReport = await runStorageDoctor();
         const values = await storage.get(STORAGE_DEFAULTS);
@@ -2371,6 +2421,7 @@ function addGlobalStyle(css) {
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
         parentalWeeklySchedule = normalizeParentalWeeklySchedule(values[KEY_PARENTAL_WEEKLY_SCHEDULE]);
         parentalDeviceOverrides = normalizeParentalDeviceOverrides(values[KEY_PARENTAL_DEVICE_OVERRIDES]);
+        offlineLogCachePrivacy = normalizeOfflineLogCachePrivacy(values[KEY_OFFLINE_LOG_CACHE_PRIVACY]);
     }
 
     function delayRequest(ms) {
@@ -8509,7 +8560,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.34',
+            source: 'NDNS v3.4.35',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9009,6 +9060,70 @@ function addGlobalStyle(css) {
             await importNdnsSettingsBackupFile(importSettingsInput.files?.[0], storageDoctorStatus);
         };
 
+        const offlineCacheStatus = document.createElement('div');
+        offlineCacheStatus.className = 'settings-section-description';
+        offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+
+        const offlineCacheRow = document.createElement('div');
+        offlineCacheRow.className = 'settings-control-row';
+        offlineCacheRow.appendChild(createSafeElement('span', { text: 'Offline Log Cache' }));
+        const offlineCacheToggle = document.createElement('div');
+        offlineCacheToggle.className = `ndns-toggle-switch ${offlineLogCachePrivacy.enabled ? 'active' : ''}`;
+        offlineCacheToggle.onclick = async () => {
+            offlineLogCachePrivacy.enabled = !offlineLogCachePrivacy.enabled;
+            offlineCacheToggle.classList.toggle('active', offlineLogCachePrivacy.enabled);
+            await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
+            offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+            showToast(`Offline log cache ${offlineLogCachePrivacy.enabled ? 'enabled' : 'disabled'}.`);
+        };
+        offlineCacheRow.appendChild(offlineCacheToggle);
+
+        const offlineTtlRow = document.createElement('div');
+        offlineTtlRow.className = 'settings-control-row';
+        offlineTtlRow.appendChild(createSafeElement('span', { text: 'Offline Cache TTL' }));
+        const offlineTtlSelect = document.createElement('select');
+        offlineTtlSelect.setAttribute('aria-label', 'Offline cache TTL');
+        OFFLINE_LOG_CACHE_TTL_DAYS.forEach((days) => {
+            const option = document.createElement('option');
+            option.value = String(days);
+            option.textContent = `${days} day${days === 1 ? '' : 's'}`;
+            option.selected = offlineLogCachePrivacy.ttlDays === days;
+            offlineTtlSelect.appendChild(option);
+        });
+        offlineTtlSelect.onchange = async () => {
+            offlineLogCachePrivacy.ttlDays = Number(offlineTtlSelect.value) || 1;
+            await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
+            offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+        };
+        offlineTtlRow.appendChild(offlineTtlSelect);
+
+        const offlineBackupRow = document.createElement('div');
+        offlineBackupRow.className = 'settings-control-row';
+        offlineBackupRow.appendChild(createSafeElement('span', { text: 'Allow Future Cache Export' }));
+        const offlineBackupToggle = document.createElement('div');
+        offlineBackupToggle.className = `ndns-toggle-switch ${offlineLogCachePrivacy.includeInBackups ? 'active' : ''}`;
+        offlineBackupToggle.onclick = async () => {
+            offlineLogCachePrivacy.includeInBackups = !offlineLogCachePrivacy.includeInBackups;
+            offlineBackupToggle.classList.toggle('active', offlineLogCachePrivacy.includeInBackups);
+            await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
+            offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+        };
+        offlineBackupRow.appendChild(offlineBackupToggle);
+
+        const purgeOfflineCacheBtn = document.createElement('button');
+        purgeOfflineCacheBtn.textContent = 'Purge Offline Log Cache';
+        purgeOfflineCacheBtn.className = 'ndns-panel-button danger';
+        purgeOfflineCacheBtn.onclick = async () => {
+            purgeOfflineCacheBtn.disabled = true;
+            try {
+                await purgeOfflineLogCache(offlineCacheStatus);
+            } catch (error) {
+                showToast(`Offline cache purge failed: ${error.message || error}`, true, 6000);
+            } finally {
+                purgeOfflineCacheBtn.disabled = false;
+            }
+        };
+
         const exportHostsBtn = document.createElement('button');
         exportHostsBtn.id = 'export-hosts-btn';
         exportHostsBtn.className = 'ndns-panel-button';
@@ -9094,6 +9209,11 @@ function addGlobalStyle(css) {
             exportSettingsBtn,
             importSettingsBtn,
             importSettingsInput,
+            offlineCacheStatus,
+            offlineCacheRow,
+            offlineTtlRow,
+            offlineBackupRow,
+            purgeOfflineCacheBtn,
             exportHostsBtn,
             exportProfileBtn,
             bulkImportBtn,
@@ -9502,7 +9622,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.34';
+        footer.textContent = 'NDNS v3.4.35';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
