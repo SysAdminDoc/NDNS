@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.19
+// @version      3.4.20
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -91,6 +91,7 @@ function addGlobalStyle(css) {
     const KEY_WEBHOOK_DOMAINS = `${KEY_PREFIX}webhook_domains_v1`;
     const KEY_WEBHOOK_TEMPLATE = `${KEY_PREFIX}webhook_template_v1`;
     const KEY_WEBHOOK_DELIVERIES = `${KEY_PREFIX}webhook_deliveries_v1`;
+    const KEY_WEBHOOK_RATE_LIMIT = `${KEY_PREFIX}webhook_rate_limit_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
 
     // --- HAGEZI CONFIG ---
@@ -141,6 +142,7 @@ function addGlobalStyle(css) {
     let webhookDomains = [];
     let webhookTemplate = { preset: 'generic', template: '' };
     let webhookDeliveries = [];
+    let webhookRateLimitSeconds = 60;
     let showCnameChain = true;
     let scheduledLogTimer = null;
     // SLDs for proper root domain detection (unified list used everywhere)
@@ -1875,6 +1877,7 @@ function addGlobalStyle(css) {
             [KEY_WEBHOOK_DOMAINS]: [],
             [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
             [KEY_WEBHOOK_DELIVERIES]: [],
+            [KEY_WEBHOOK_RATE_LIMIT]: 60,
             [KEY_SHOW_CNAME_CHAIN]: true
         });
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
@@ -1912,6 +1915,7 @@ function addGlobalStyle(css) {
         webhookDomains = values[KEY_WEBHOOK_DOMAINS];
         webhookTemplate = { preset: 'generic', template: '', ...(values[KEY_WEBHOOK_TEMPLATE] || {}) };
         webhookDeliveries = Array.isArray(values[KEY_WEBHOOK_DELIVERIES]) ? values[KEY_WEBHOOK_DELIVERIES].slice(0, 5) : [];
+        webhookRateLimitSeconds = Number(values[KEY_WEBHOOK_RATE_LIMIT] ?? 60);
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
     }
 
@@ -6410,7 +6414,7 @@ function addGlobalStyle(css) {
     }
 
     // --- WEBHOOK/ALERT INTEGRATION ---
-    const webhookSentDomains = new Set();
+    const webhookSentDomains = new Map();
     const WEBHOOK_TEMPLATE_PRESETS = {
         generic: `{
   "event": "domain_query",
@@ -6542,6 +6546,21 @@ function addGlobalStyle(css) {
         }
     }
 
+    function isWebhookRateLimited(key) {
+        const seconds = Math.max(0, Number(webhookRateLimitSeconds) || 0);
+        if (seconds === 0) return false;
+        const now = Date.now();
+        const windowMs = seconds * 1000;
+        const lastSent = webhookSentDomains.get(key) || 0;
+        if (now - lastSent < windowMs) return true;
+
+        webhookSentDomains.set(key, now);
+        for (const [storedKey, timestamp] of webhookSentDomains.entries()) {
+            if (now - timestamp > windowMs * 2) webhookSentDomains.delete(storedKey);
+        }
+        return false;
+    }
+
     function renderWebhookDeliveries(container = document.getElementById('ndns-webhook-delivery-log')) {
         if (!container) return;
         container.textContent = '';
@@ -6613,18 +6632,17 @@ function addGlobalStyle(css) {
             timestamp: context.timestamp || new Date()
         };
         const sentKey = `${payloadContext.domain}|${payloadContext.device}|${payloadContext.status}`;
-        if (webhookSentDomains.has(sentKey)) return;
 
         const matchedFilter = webhookDomains.find(wd => matchesWebhookExpression(wd, payloadContext));
         if (!matchedFilter) return;
-        webhookSentDomains.add(sentKey);
+        if (isWebhookRateLimited(sentKey)) return;
 
         const templateContext = {
             ...payloadContext,
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.19',
+            source: 'NDNS v3.4.20',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -6764,6 +6782,23 @@ function addGlobalStyle(css) {
         };
         addRow.append(addInput, addBtn);
         container.appendChild(addRow);
+
+        const rateDesc = document.createElement('div');
+        rateDesc.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 6px 0 4px;';
+        rateDesc.textContent = 'Duplicate guard window (seconds). Use 0 to disable duplicate suppression.';
+        const rateInput = document.createElement('input');
+        rateInput.type = 'number';
+        rateInput.min = '0';
+        rateInput.step = '1';
+        rateInput.value = String(Math.max(0, Number(webhookRateLimitSeconds) || 0));
+        rateInput.onchange = async () => {
+            webhookRateLimitSeconds = Math.max(0, Number(rateInput.value) || 0);
+            rateInput.value = String(webhookRateLimitSeconds);
+            webhookSentDomains.clear();
+            await storage.set({ [KEY_WEBHOOK_RATE_LIMIT]: webhookRateLimitSeconds });
+            showToast('Webhook duplicate guard saved.');
+        };
+        container.append(rateDesc, rateInput);
 
         const testRow = document.createElement('div');
         testRow.style.cssText = 'display:flex;gap:4px;margin-top:6px;';
@@ -7433,7 +7468,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.19';
+        footer.textContent = 'NDNS v3.4.20';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
