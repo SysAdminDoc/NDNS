@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.15
+// @version      3.4.16
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -2997,6 +2997,41 @@ function addGlobalStyle(css) {
             });
     }
 
+    function parseLocalBlocklistDomains(text) {
+        const seen = new Set();
+        const domains = [];
+        const addDomain = (raw) => {
+            const domain = normalizeImportedDomain(raw);
+            if (!/^[a-z0-9][a-z0-9.-]*\.[a-z0-9-]{2,}$/i.test(domain)) return;
+            if (seen.has(domain)) return;
+            seen.add(domain);
+            domains.push(domain);
+        };
+
+        String(text || '').split(/\r?\n/).forEach((rawLine) => {
+            let line = rawLine.trim();
+            if (!line || line.startsWith('#') || line.startsWith('!') || line.startsWith('[') || line.startsWith('@@')) return;
+            line = line.replace(/\s+#.*$/, '').trim();
+
+            const hostsMatch = line.match(/^(?:0\.0\.0\.0|127\.0\.0\.1|::1|255\.255\.255\.255)\s+(.+)$/i);
+            if (hostsMatch) {
+                hostsMatch[1].split(/\s+/).forEach(addDomain);
+                return;
+            }
+
+            const adblockMatch = line.match(/^\|\|([^/^$*]+)\^/i);
+            if (adblockMatch) {
+                addDomain(adblockMatch[1]);
+                return;
+            }
+
+            if (line.startsWith('/') && line.endsWith('/')) return;
+            addDomain(line.replace(/^\|\|/, '').replace(/\^.*$/, ''));
+        });
+
+        return domains;
+    }
+
     async function addDomainToList(domain, mode = 'deny', profileId = getCurrentProfileId(), options = {}) {
         if (!NDNS_API_KEY) throw new Error('API Key not set.');
         if (!profileId) throw new Error('Could not find Profile ID.');
@@ -3168,6 +3203,89 @@ function addGlobalStyle(css) {
 
         buttonRow.append(importBtn, cancelBtn);
         modal.append(listSelect, textarea, statusEl, buttonRow);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        textarea.focus();
+    }
+
+    function showLocalBlocklistImport() {
+        if (!NDNS_API_KEY) return showToast('API Key not set.', true);
+        const pid = getCurrentProfileId();
+        if (!pid) return showToast('Could not find Profile ID.', true);
+
+        const overlay = document.createElement('div');
+        overlay.className = 'ndns-profile-modal-overlay';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const modal = document.createElement('div');
+        modal.className = 'ndns-profile-modal';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = document.createElement('h3');
+        title.textContent = 'Import Local Blocklist';
+
+        const help = document.createElement('p');
+        help.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;';
+        help.textContent = 'Paste hosts-file rows, AdBlock ||domain^ rules, URLs, or plain domains. Exceptions and regex rules are skipped.';
+
+        const textarea = document.createElement('textarea');
+        textarea.className = 'ndns-input';
+        textarea.placeholder = '0.0.0.0 ads.example.com\n||tracker.example.net^\nhttps://bad.example.org/path';
+        textarea.style.cssText = 'min-height:180px;resize:vertical;font-family:monospace;';
+
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'font-size:12px;color:var(--panel-text-secondary);margin-top:8px;';
+        statusEl.textContent = 'Idle';
+
+        const buttonRow = document.createElement('div');
+        buttonRow.className = 'modal-actions';
+
+        const importBtn = document.createElement('button');
+        importBtn.className = 'ndns-panel-button';
+        importBtn.textContent = 'Import to Denylist';
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ndns-panel-button danger';
+        closeBtn.textContent = 'Close';
+        closeBtn.onclick = () => overlay.remove();
+
+        importBtn.onclick = async () => {
+            const domains = parseLocalBlocklistDomains(textarea.value);
+            if (domains.length === 0) {
+                statusEl.textContent = 'No valid blocklist domains found.';
+                showToast(statusEl.textContent, true);
+                return;
+            }
+
+            importBtn.disabled = true;
+            textarea.disabled = true;
+            let added = 0;
+            const failures = [];
+
+            for (let i = 0; i < domains.length; i++) {
+                const domain = domains[i];
+                statusEl.textContent = `Importing ${i + 1}/${domains.length}: ${domain}`;
+                try {
+                    await addDomainToList(domain, 'deny', pid);
+                    added++;
+                } catch (error) {
+                    failures.push(`${domain}: ${error.message || 'Unknown error'}`);
+                }
+                await sleep(120);
+            }
+
+            invalidateLogCache();
+            cleanLogs();
+            statusEl.textContent = failures.length
+                ? `Imported ${added}/${domains.length}. Failed: ${failures.slice(0, 3).join('; ')}`
+                : `Imported ${added}/${domains.length}.`;
+            showToast(`Imported ${added} blocklist domains${failures.length ? ` (${failures.length} failed)` : ''}.`, failures.length > 0);
+            importBtn.disabled = false;
+            textarea.disabled = false;
+        };
+
+        buttonRow.append(importBtn, closeBtn);
+        modal.append(title, help, textarea, statusEl, buttonRow);
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
         textarea.focus();
@@ -6303,7 +6421,7 @@ function addGlobalStyle(css) {
                     domain: domain,
                     timestamp: new Date().toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.15'
+                    source: 'NDNS v3.4.16'
                 })
             });
         } catch {}
@@ -6670,6 +6788,12 @@ function addGlobalStyle(css) {
         conflictResolverBtn.onclick = showConflictResolver;
         hageziControls.appendChild(conflictResolverBtn);
 
+        const localBlocklistBtn = document.createElement('button');
+        localBlocklistBtn.textContent = 'Import Local Blocklist';
+        localBlocklistBtn.className = 'ndns-panel-button';
+        localBlocklistBtn.onclick = showLocalBlocklistImport;
+        hageziControls.appendChild(localBlocklistBtn);
+
         hageziControls.prepend(hageziAutoRow, hageziAutoStatus);
         hageziSection.append(hageziVersionStatus, hageziControls);
         modalBody.appendChild(hageziSection);
@@ -7001,7 +7125,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.15';
+        footer.textContent = 'NDNS v3.4.16';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
