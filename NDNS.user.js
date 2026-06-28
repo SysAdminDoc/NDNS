@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.18
+// @version      3.4.19
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -90,6 +90,7 @@ function addGlobalStyle(css) {
     const KEY_WEBHOOK_URL = `${KEY_PREFIX}webhook_url_v1`;
     const KEY_WEBHOOK_DOMAINS = `${KEY_PREFIX}webhook_domains_v1`;
     const KEY_WEBHOOK_TEMPLATE = `${KEY_PREFIX}webhook_template_v1`;
+    const KEY_WEBHOOK_DELIVERIES = `${KEY_PREFIX}webhook_deliveries_v1`;
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
 
     // --- HAGEZI CONFIG ---
@@ -139,6 +140,7 @@ function addGlobalStyle(css) {
     let webhookUrl = '';
     let webhookDomains = [];
     let webhookTemplate = { preset: 'generic', template: '' };
+    let webhookDeliveries = [];
     let showCnameChain = true;
     let scheduledLogTimer = null;
     // SLDs for proper root domain detection (unified list used everywhere)
@@ -1872,6 +1874,7 @@ function addGlobalStyle(css) {
             [KEY_WEBHOOK_URL]: '',
             [KEY_WEBHOOK_DOMAINS]: [],
             [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
+            [KEY_WEBHOOK_DELIVERIES]: [],
             [KEY_SHOW_CNAME_CHAIN]: true
         });
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
@@ -1908,6 +1911,7 @@ function addGlobalStyle(css) {
         webhookUrl = values[KEY_WEBHOOK_URL];
         webhookDomains = values[KEY_WEBHOOK_DOMAINS];
         webhookTemplate = { preset: 'generic', template: '', ...(values[KEY_WEBHOOK_TEMPLATE] || {}) };
+        webhookDeliveries = Array.isArray(values[KEY_WEBHOOK_DELIVERIES]) ? values[KEY_WEBHOOK_DELIVERIES].slice(0, 5) : [];
         showCnameChain = values[KEY_SHOW_CNAME_CHAIN];
     }
 
@@ -6538,6 +6542,68 @@ function addGlobalStyle(css) {
         }
     }
 
+    function renderWebhookDeliveries(container = document.getElementById('ndns-webhook-delivery-log')) {
+        if (!container) return;
+        container.textContent = '';
+        if (webhookDeliveries.length === 0) {
+            const empty = document.createElement('div');
+            empty.style.cssText = 'font-size:10px;color:var(--panel-text-secondary);';
+            empty.textContent = 'No deliveries yet.';
+            container.appendChild(empty);
+            return;
+        }
+
+        webhookDeliveries.forEach((delivery) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;justify-content:space-between;gap:6px;font-size:10px;padding:3px 6px;background:var(--section-bg);border-radius:4px;margin-bottom:2px;';
+            const when = delivery.at ? new Date(delivery.at).toLocaleTimeString() : 'unknown';
+            const left = document.createElement('span');
+            left.textContent = `${when} ${delivery.type || 'webhook'}`;
+            const right = document.createElement('span');
+            right.style.color = delivery.ok ? 'var(--success-color)' : 'var(--danger-color)';
+            right.textContent = `${delivery.ok ? 'OK' : 'FAIL'}${delivery.status ? ` ${delivery.status}` : ''}`;
+            row.title = delivery.message || '';
+            row.append(left, right);
+            container.appendChild(row);
+        });
+    }
+
+    async function recordWebhookDelivery(entry) {
+        webhookDeliveries = [{
+            at: new Date().toISOString(),
+            type: entry.type || 'query',
+            ok: !!entry.ok,
+            status: entry.status || '',
+            message: entry.message || ''
+        }, ...webhookDeliveries].slice(0, 5);
+        await storage.set({ [KEY_WEBHOOK_DELIVERIES]: webhookDeliveries });
+        renderWebhookDeliveries();
+    }
+
+    function postWebhookPayload(payload, type = 'query') {
+        if (!webhookUrl) return;
+        try {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: webhookUrl,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify(payload),
+                onload: (response) => {
+                    const ok = response.status >= 200 && response.status < 300;
+                    recordWebhookDelivery({
+                        type,
+                        ok,
+                        status: response.status,
+                        message: ok ? 'Delivered' : (response.statusText || 'HTTP error')
+                    });
+                },
+                onerror: () => recordWebhookDelivery({ type, ok: false, message: 'Network error' })
+            });
+        } catch (error) {
+            recordWebhookDelivery({ type, ok: false, message: error.message || 'Request failed' });
+        }
+    }
+
     function checkWebhookAlert(domain, context = {}) {
         if (!webhookUrl || webhookDomains.length === 0) return;
         const payloadContext = {
@@ -6558,17 +6624,12 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.18',
+            source: 'NDNS v3.4.19',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
         try {
-            GM_xmlhttpRequest({
-                method: 'POST',
-                url: webhookUrl,
-                headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify(buildWebhookPayload(templateContext))
-            });
+            postWebhookPayload(buildWebhookPayload(templateContext), 'query');
         } catch {}
     }
 
@@ -6703,6 +6764,37 @@ function addGlobalStyle(css) {
         };
         addRow.append(addInput, addBtn);
         container.appendChild(addRow);
+
+        const testRow = document.createElement('div');
+        testRow.style.cssText = 'display:flex;gap:4px;margin-top:6px;';
+        const testBtn = document.createElement('button');
+        testBtn.className = 'ndns-panel-button ndns-btn-sm';
+        testBtn.textContent = 'Test Webhook';
+        testBtn.onclick = () => {
+            if (!webhookUrl) return showToast('Webhook URL required.', true);
+            const sampleContext = {
+                domain: 'ads.example.com',
+                device: 'laptop',
+                status: 'blocked',
+                matchedFilter: webhookDomains[0] || 'domain:ads status:blocked',
+                timestamp: new Date().toISOString(),
+                profile: getCurrentProfileId() || 'profile',
+                source: 'NDNS test',
+                color: 15020400
+            };
+            postWebhookPayload(buildWebhookPayload(sampleContext), 'test');
+            showToast('Webhook test sent.');
+        };
+        testRow.appendChild(testBtn);
+        container.appendChild(testRow);
+
+        const deliveryTitle = document.createElement('div');
+        deliveryTitle.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 6px 0 4px;';
+        deliveryTitle.textContent = 'Last 5 deliveries:';
+        const deliveryLog = document.createElement('div');
+        deliveryLog.id = 'ndns-webhook-delivery-log';
+        container.append(deliveryTitle, deliveryLog);
+        renderWebhookDeliveries(deliveryLog);
     }
 
     // --- SETTINGS MODAL ---
@@ -7341,7 +7433,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.18';
+        footer.textContent = 'NDNS v3.4.19';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
