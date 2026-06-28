@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.30
+// @version      3.4.31
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -51,6 +51,7 @@ function addGlobalStyle(css) {
     let NDNS_API_KEY = null;
     let globalProfileId = null;
     const KEY_PREFIX = 'ndns_';
+    const KEY_SCHEMA_VERSION = `${KEY_PREFIX}schema_version_v1`;
     const KEY_POSITION_TOP = `${KEY_PREFIX}panel_position_top_v2`;
     const KEY_POSITION_SIDE = `${KEY_PREFIX}panel_position_side_v2`;
     const KEY_FILTER_STATE = `${KEY_PREFIX}filter_state_v2`;
@@ -98,6 +99,54 @@ function addGlobalStyle(css) {
     const KEY_SHOW_CNAME_CHAIN = `${KEY_PREFIX}show_cname_chain_v1`;
     const KEY_PARENTAL_WEEKLY_SCHEDULE = `${KEY_PREFIX}parental_weekly_schedule_v1`;
     const KEY_PARENTAL_DEVICE_OVERRIDES = `${KEY_PREFIX}parental_device_overrides_v1`;
+    const STORAGE_SCHEMA_VERSION = 1;
+    const STORAGE_BACKUP_TYPE = 'ndns-settings';
+    const defaultFilters = { hideList: false, hideBlocked: false, showOnlyWhitelisted: false, autoRefresh: false };
+    const STORAGE_DEFAULTS = {
+        [KEY_FILTER_STATE]: defaultFilters,
+        [KEY_HIDDEN_DOMAINS]: ['nextdns.io'],
+        [KEY_LOCK_STATE]: true,
+        [KEY_THEME]: 'dark',
+        [KEY_WIDTH]: 180,
+        [KEY_API_KEY]: null,
+        [KEY_PROFILE_ID]: null,
+        [KEY_DOMAIN_ACTIONS]: {},
+        [KEY_DOMAIN_UNDO_STACK]: [],
+        [KEY_DOMAIN_OF_DAY]: {},
+        [KEY_LIST_PAGE_THEME]: true,
+        [KEY_HAGEZI_ADDED_TLDS]: [],
+        [KEY_HAGEZI_ADDED_ALLOWLIST]: [],
+        [KEY_HAGEZI_LIST_META]: {},
+        [KEY_HAGEZI_LIST_SNAPSHOTS]: {},
+        [KEY_HAGEZI_AUTO_SYNC]: { enabled: false, lastRun: null },
+        [KEY_ULTRA_CONDENSED]: true,
+        [KEY_CUSTOM_CSS_ENABLED]: true,
+        [KEY_THEME_STUDIO_CSS]: '',
+        [KEY_DENSITY_MODE]: 'compact',
+        [KEY_DOMAIN_DESCRIPTIONS]: {},
+        [KEY_DOMAIN_TAGS]: {},
+        [KEY_LIST_SORT_AZ]: false,
+        [KEY_LIST_SORT_TLD]: false,
+        [KEY_LIST_BOLD_ROOT]: true,
+        [KEY_LIST_LIGHTEN_SUB]: true,
+        [KEY_LIST_RIGHT_ALIGN]: false,
+        [KEY_SHOW_LOG_COUNTERS]: true,
+        [KEY_COLLAPSE_BLOCKLISTS]: false,
+        [KEY_COLLAPSE_TLDS]: false,
+        [KEY_REGEX_PATTERNS]: [],
+        [KEY_SCHEDULED_LOGS]: { enabled: false, interval: 'daily', lastRun: null },
+        [KEY_WEBHOOK_URL]: '',
+        [KEY_WEBHOOK_DOMAINS]: [],
+        [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
+        [KEY_WEBHOOK_DELIVERIES]: [],
+        [KEY_WEBHOOK_RATE_LIMIT]: 60,
+        [KEY_WEBHOOK_TRUST]: { url: '', host: '', consent: false },
+        [KEY_SHOW_CNAME_CHAIN]: true,
+        [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null },
+        [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null }
+    };
+    const STORAGE_BACKUP_EXCLUDED_KEYS = new Set([KEY_API_KEY]);
+    const STORAGE_BACKUP_KEYS = Object.keys(STORAGE_DEFAULTS).filter(key => !STORAGE_BACKUP_EXCLUDED_KEYS.has(key));
 
     // --- HAGEZI CONFIG ---
     const HAGEZI_TLDS_URL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/spam-tlds-adblock-aggressive.txt";
@@ -167,6 +216,7 @@ function addGlobalStyle(css) {
     let parentalDeviceOverrideTimer = null;
     let parentalDeviceOverrideApplying = false;
     let parentalDeviceOverrideLastErrorAt = 0;
+    let storageDoctorReport = null;
     // SLDs for proper root domain detection (unified list used everywhere)
     const SLDs = new Set(["co", "com", "org", "edu", "gov", "mil", "net", "ac", "or", "ne", "go", "ltd"]);
 
@@ -1974,52 +2024,296 @@ function addGlobalStyle(css) {
         return n;
     }
 
-    async function initializeState() {
-        const defaultFilters = { hideList: false, hideBlocked: false, showOnlyWhitelisted: false, autoRefresh: false };
-        const values = await storage.get({
-            [KEY_FILTER_STATE]: defaultFilters,
-            [KEY_HIDDEN_DOMAINS]: ['nextdns.io'],
-            [KEY_LOCK_STATE]: true,
-            [KEY_THEME]: 'dark',
-            [KEY_WIDTH]: 180,
-            [KEY_API_KEY]: null,
-            [KEY_PROFILE_ID]: null,
-            [KEY_DOMAIN_ACTIONS]: {},
-            [KEY_DOMAIN_UNDO_STACK]: [],
-            [KEY_DOMAIN_OF_DAY]: {},
-            [KEY_LIST_PAGE_THEME]: true,
-            [KEY_HAGEZI_LIST_META]: {},
-            [KEY_HAGEZI_LIST_SNAPSHOTS]: {},
-            [KEY_HAGEZI_AUTO_SYNC]: { enabled: false, lastRun: null },
-            [KEY_ULTRA_CONDENSED]: true,
-            [KEY_CUSTOM_CSS_ENABLED]: true,
-            [KEY_THEME_STUDIO_CSS]: '',
-            [KEY_DENSITY_MODE]: 'compact',
-            // NDNS features
-            [KEY_DOMAIN_DESCRIPTIONS]: {},
-            [KEY_DOMAIN_TAGS]: {},
-            [KEY_LIST_SORT_AZ]: false,
-            [KEY_LIST_SORT_TLD]: false,
-            [KEY_LIST_BOLD_ROOT]: true,
-            [KEY_LIST_LIGHTEN_SUB]: true,
-            [KEY_LIST_RIGHT_ALIGN]: false,
+    function cloneStorageValue(value) {
+        if (value === undefined || value === null) return value;
+        return JSON.parse(JSON.stringify(value));
+    }
 
-            [KEY_SHOW_LOG_COUNTERS]: true,
-            [KEY_COLLAPSE_BLOCKLISTS]: false,
-            [KEY_COLLAPSE_TLDS]: false,
-            // v3.4 features
-            [KEY_REGEX_PATTERNS]: [],
-            [KEY_SCHEDULED_LOGS]: { enabled: false, interval: 'daily', lastRun: null },
-            [KEY_WEBHOOK_URL]: '',
-            [KEY_WEBHOOK_DOMAINS]: [],
-            [KEY_WEBHOOK_TEMPLATE]: { preset: 'generic', template: '' },
-            [KEY_WEBHOOK_DELIVERIES]: [],
-            [KEY_WEBHOOK_RATE_LIMIT]: 60,
-            [KEY_WEBHOOK_TRUST]: { url: '', host: '', consent: false },
-            [KEY_SHOW_CNAME_CHAIN]: true,
-            [KEY_PARENTAL_WEEKLY_SCHEDULE]: { enabled: false, slots: [], lastApplied: null },
-            [KEY_PARENTAL_DEVICE_OVERRIDES]: { rules: [], activeRuleId: null, previousRecreationEnabled: null }
+    function isPlainObject(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function valuesEqual(a, b) {
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    function normalizeBoolean(value, fallback = false) {
+        if (typeof value === 'boolean') return value;
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+        return fallback;
+    }
+
+    function normalizeNumber(value, fallback, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(max, Math.max(min, n));
+    }
+
+    function normalizeString(value, fallback = '') {
+        if (typeof value === 'string') return value;
+        if (value === null || value === undefined) return fallback;
+        return String(value);
+    }
+
+    function normalizeNullableString(value) {
+        if (value === null || value === undefined || value === '') return null;
+        return String(value);
+    }
+
+    function normalizeTimestamp(value) {
+        const n = Number(value);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
+    function normalizeStringArray(value, fallback = []) {
+        if (!Array.isArray(value)) return fallback.slice();
+        return [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))];
+    }
+
+    function normalizeObjectMap(value) {
+        return isPlainObject(value) ? value : {};
+    }
+
+    function normalizeFilterState(value) {
+        const source = isPlainObject(value) ? value : {};
+        return {
+            hideList: normalizeBoolean(source.hideList, defaultFilters.hideList),
+            hideBlocked: normalizeBoolean(source.hideBlocked, defaultFilters.hideBlocked),
+            showOnlyWhitelisted: normalizeBoolean(source.showOnlyWhitelisted, defaultFilters.showOnlyWhitelisted),
+            autoRefresh: normalizeBoolean(source.autoRefresh, defaultFilters.autoRefresh)
+        };
+    }
+
+    function normalizeHageziAutoSync(value) {
+        const source = isPlainObject(value) ? value : {};
+        return {
+            enabled: normalizeBoolean(source.enabled, false),
+            lastRun: normalizeTimestamp(source.lastRun)
+        };
+    }
+
+    function normalizeRegexPatterns(value) {
+        if (!Array.isArray(value)) return [];
+        return value
+            .filter(item => isPlainObject(item) && typeof item.pattern === 'string' && item.pattern.trim())
+            .map(item => ({
+                pattern: item.pattern,
+                flags: typeof item.flags === 'string' ? item.flags : 'i',
+                label: typeof item.label === 'string' ? item.label : '',
+                color: typeof item.color === 'string' ? item.color : 'rgba(255,193,7,0.3)',
+                textColor: typeof item.textColor === 'string' ? item.textColor : 'inherit'
+            }));
+    }
+
+    function normalizeScheduledLogsConfig(value) {
+        const source = isPlainObject(value) ? value : {};
+        const interval = ['hourly', 'daily', 'weekly'].includes(source.interval) ? source.interval : 'daily';
+        return {
+            enabled: normalizeBoolean(source.enabled, false),
+            interval,
+            lastRun: normalizeTimestamp(source.lastRun)
+        };
+    }
+
+    function normalizeWebhookTemplate(value) {
+        const source = isPlainObject(value) ? value : {};
+        return {
+            preset: ['generic', 'discord', 'slack'].includes(source.preset) ? source.preset : 'generic',
+            template: typeof source.template === 'string' ? source.template : ''
+        };
+    }
+
+    function normalizeWebhookDeliveries(value) {
+        if (!Array.isArray(value)) return [];
+        return value
+            .filter(item => isPlainObject(item))
+            .slice(0, 5)
+            .map(item => ({
+                at: normalizeTimestamp(item.at) || Date.now(),
+                ok: normalizeBoolean(item.ok, false),
+                status: Number.isFinite(Number(item.status)) ? Number(item.status) : null,
+                type: typeof item.type === 'string' ? item.type : 'event',
+                detail: typeof item.detail === 'string' ? item.detail.slice(0, 180) : ''
+            }));
+    }
+
+    function normalizeStorageValue(key, value) {
+        const defaultValue = STORAGE_DEFAULTS[key];
+        switch (key) {
+            case KEY_FILTER_STATE: return normalizeFilterState(value);
+            case KEY_HIDDEN_DOMAINS:
+            case KEY_HAGEZI_ADDED_TLDS:
+            case KEY_HAGEZI_ADDED_ALLOWLIST:
+            case KEY_WEBHOOK_DOMAINS:
+                return normalizeStringArray(value, cloneStorageValue(defaultValue));
+            case KEY_LOCK_STATE:
+            case KEY_LIST_PAGE_THEME:
+            case KEY_ULTRA_CONDENSED:
+            case KEY_CUSTOM_CSS_ENABLED:
+            case KEY_LIST_SORT_AZ:
+            case KEY_LIST_SORT_TLD:
+            case KEY_LIST_BOLD_ROOT:
+            case KEY_LIST_LIGHTEN_SUB:
+            case KEY_LIST_RIGHT_ALIGN:
+            case KEY_SHOW_LOG_COUNTERS:
+            case KEY_COLLAPSE_BLOCKLISTS:
+            case KEY_COLLAPSE_TLDS:
+            case KEY_SHOW_CNAME_CHAIN:
+                return normalizeBoolean(value, defaultValue);
+            case KEY_WIDTH:
+                return normalizeNumber(value, defaultValue, 120, 640);
+            case KEY_API_KEY:
+            case KEY_PROFILE_ID:
+                return normalizeNullableString(value);
+            case KEY_THEME:
+                return ['dark', 'darkblue', 'light'].includes(value) ? value : defaultValue;
+            case KEY_DENSITY_MODE:
+                return value === 'roomy' ? 'roomy' : 'compact';
+            case KEY_THEME_STUDIO_CSS:
+            case KEY_WEBHOOK_URL:
+                return normalizeString(value, defaultValue);
+            case KEY_DOMAIN_ACTIONS:
+            case KEY_DOMAIN_OF_DAY:
+            case KEY_HAGEZI_LIST_META:
+            case KEY_HAGEZI_LIST_SNAPSHOTS:
+            case KEY_DOMAIN_DESCRIPTIONS:
+            case KEY_DOMAIN_TAGS:
+                return normalizeObjectMap(value);
+            case KEY_DOMAIN_UNDO_STACK:
+                return Array.isArray(value) ? value.slice(0, 10) : [];
+            case KEY_HAGEZI_AUTO_SYNC:
+                return normalizeHageziAutoSync(value);
+            case KEY_REGEX_PATTERNS:
+                return normalizeRegexPatterns(value);
+            case KEY_SCHEDULED_LOGS:
+                return normalizeScheduledLogsConfig(value);
+            case KEY_WEBHOOK_TEMPLATE:
+                return normalizeWebhookTemplate(value);
+            case KEY_WEBHOOK_DELIVERIES:
+                return normalizeWebhookDeliveries(value);
+            case KEY_WEBHOOK_RATE_LIMIT:
+                return Math.round(normalizeNumber(value, defaultValue, 0, 86400));
+            case KEY_WEBHOOK_TRUST:
+                return normalizeWebhookTrust(value);
+            case KEY_PARENTAL_WEEKLY_SCHEDULE:
+                return normalizeParentalWeeklySchedule(value);
+            case KEY_PARENTAL_DEVICE_OVERRIDES:
+                return normalizeParentalDeviceOverrides(value);
+            default:
+                return cloneStorageValue(defaultValue);
+        }
+    }
+
+    function describeStorageKey(key) {
+        return key.replace(KEY_PREFIX, '').replace(/_v\d+$/, '').replace(/_/g, ' ');
+    }
+
+    function buildStorageDefaultsWithSchema() {
+        return { [KEY_SCHEMA_VERSION]: 0, ...STORAGE_DEFAULTS };
+    }
+
+    async function runStorageDoctor() {
+        const stored = await storage.get(buildStorageDefaultsWithSchema());
+        const currentVersion = Math.max(0, Number(stored[KEY_SCHEMA_VERSION]) || 0);
+        const writes = {};
+        const repaired = [];
+        const migrations = [];
+
+        if (currentVersion < STORAGE_SCHEMA_VERSION) {
+            migrations.push(`schema ${currentVersion || 'new'} -> ${STORAGE_SCHEMA_VERSION}`);
+            writes[KEY_SCHEMA_VERSION] = STORAGE_SCHEMA_VERSION;
+        }
+
+        Object.keys(STORAGE_DEFAULTS).forEach((key) => {
+            const normalized = normalizeStorageValue(key, stored[key]);
+            if (!valuesEqual(normalized, stored[key])) {
+                writes[key] = normalized;
+                repaired.push(describeStorageKey(key));
+            }
         });
+
+        if (Object.keys(writes).length) {
+            await storage.set(writes);
+        }
+
+        return {
+            schemaVersion: STORAGE_SCHEMA_VERSION,
+            previousSchemaVersion: currentVersion,
+            migrations,
+            repaired,
+            repairedCount: repaired.length,
+            wrote: Object.keys(writes)
+        };
+    }
+
+    function formatStorageDoctorMessage(report) {
+        if (!report) return 'Storage doctor has not run yet.';
+        if (!report.migrations.length && report.repairedCount === 0) {
+            return `Storage schema v${report.schemaVersion} healthy.`;
+        }
+        const parts = [];
+        if (report.migrations.length) parts.push(report.migrations.join(', '));
+        if (report.repairedCount) parts.push(`repaired ${report.repairedCount}: ${report.repaired.slice(0, 4).join(', ')}${report.repairedCount > 4 ? '...' : ''}`);
+        return `Storage doctor: ${parts.join('; ')}.`;
+    }
+
+    function renderStorageDoctorStatus(element, report = storageDoctorReport) {
+        if (!element) return;
+        element.textContent = formatStorageDoctorMessage(report);
+    }
+
+    async function exportNdnsSettingsBackup() {
+        const values = await storage.get(STORAGE_BACKUP_KEYS);
+        const backup = {
+            app: 'NDNS',
+            backupType: STORAGE_BACKUP_TYPE,
+            schemaVersion: STORAGE_SCHEMA_VERSION,
+            exportedAt: new Date().toISOString(),
+            excludedKeys: [...STORAGE_BACKUP_EXCLUDED_KEYS],
+            values: {}
+        };
+        STORAGE_BACKUP_KEYS.forEach((key) => {
+            backup.values[key] = normalizeStorageValue(key, values[key]);
+        });
+        downloadFile(JSON.stringify(backup, null, 2), `NDNS-Settings-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
+        showToast('NDNS settings backup exported.');
+    }
+
+    async function importNdnsSettingsBackupFile(file, statusEl) {
+        if (!file) return;
+        const text = await file.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch {
+            showToast('Invalid NDNS settings backup JSON.', true);
+            return;
+        }
+        if (!isPlainObject(parsed) || parsed.backupType !== STORAGE_BACKUP_TYPE || !isPlainObject(parsed.values)) {
+            showToast('This is not an NDNS settings backup.', true);
+            return;
+        }
+
+        const writes = { [KEY_SCHEMA_VERSION]: STORAGE_SCHEMA_VERSION };
+        const repaired = [];
+        STORAGE_BACKUP_KEYS.forEach((key) => {
+            if (!Object.prototype.hasOwnProperty.call(parsed.values, key)) return;
+            const normalized = normalizeStorageValue(key, parsed.values[key]);
+            writes[key] = normalized;
+            if (!valuesEqual(normalized, parsed.values[key])) repaired.push(describeStorageKey(key));
+        });
+
+        await storage.set(writes);
+        storageDoctorReport = await runStorageDoctor();
+        renderStorageDoctorStatus(statusEl);
+        showToast(`NDNS settings imported${repaired.length ? ` with ${repaired.length} repaired values` : ''}. Reloading...`, false, 2500);
+        setTimeout(() => location.reload(), 1200);
+    }
+
+    async function initializeState() {
+        storageDoctorReport = await runStorageDoctor();
+        const values = await storage.get(STORAGE_DEFAULTS);
         filters = { ...defaultFilters, ...values[KEY_FILTER_STATE] };
         hiddenDomains = new Set(values[KEY_HIDDEN_DOMAINS]);
         isManuallyLocked = values[KEY_LOCK_STATE];
@@ -7856,7 +8150,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.30',
+            source: 'NDNS v3.4.31',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -8304,6 +8598,52 @@ function addGlobalStyle(css) {
         const dataControls = document.createElement('div');
         dataControls.className = 'ndns-settings-controls';
 
+        const storageDoctorStatus = document.createElement('div');
+        storageDoctorStatus.className = 'settings-section-description';
+        renderStorageDoctorStatus(storageDoctorStatus);
+
+        const storageDoctorBtn = document.createElement('button');
+        storageDoctorBtn.textContent = 'Run Storage Doctor';
+        storageDoctorBtn.className = 'ndns-panel-button';
+        storageDoctorBtn.onclick = async () => {
+            storageDoctorBtn.disabled = true;
+            storageDoctorBtn.textContent = 'Checking...';
+            try {
+                storageDoctorReport = await runStorageDoctor();
+                renderStorageDoctorStatus(storageDoctorStatus);
+                showToast(formatStorageDoctorMessage(storageDoctorReport), storageDoctorReport.repairedCount > 0, 6000);
+                if (storageDoctorReport.repairedCount > 0 || storageDoctorReport.migrations.length > 0) {
+                    setTimeout(() => location.reload(), 1200);
+                }
+            } catch (error) {
+                showToast(`Storage doctor failed: ${error.message || error}`, true, 6000);
+            } finally {
+                storageDoctorBtn.disabled = false;
+                storageDoctorBtn.textContent = 'Run Storage Doctor';
+            }
+        };
+
+        const exportSettingsBtn = document.createElement('button');
+        exportSettingsBtn.textContent = 'Export NDNS Settings';
+        exportSettingsBtn.className = 'ndns-panel-button';
+        exportSettingsBtn.onclick = exportNdnsSettingsBackup;
+
+        const importSettingsInput = document.createElement('input');
+        importSettingsInput.type = 'file';
+        importSettingsInput.accept = 'application/json,.json';
+        importSettingsInput.style.display = 'none';
+
+        const importSettingsBtn = document.createElement('button');
+        importSettingsBtn.textContent = 'Import NDNS Settings';
+        importSettingsBtn.className = 'ndns-panel-button';
+        importSettingsBtn.onclick = () => {
+            importSettingsInput.value = '';
+            importSettingsInput.click();
+        };
+        importSettingsInput.onchange = async () => {
+            await importNdnsSettingsBackupFile(importSettingsInput.files?.[0], storageDoctorStatus);
+        };
+
         const exportHostsBtn = document.createElement('button');
         exportHostsBtn.id = 'export-hosts-btn';
         exportHostsBtn.className = 'ndns-panel-button';
@@ -8383,7 +8723,21 @@ function addGlobalStyle(css) {
             }
         };
 
-        dataControls.append(exportHostsBtn, exportProfileBtn, bulkImportBtn, wildcardBuilderBtn, domainUndoBtn, importBtn, exportListBtn, clearBtn);
+        dataControls.append(
+            storageDoctorStatus,
+            storageDoctorBtn,
+            exportSettingsBtn,
+            importSettingsBtn,
+            importSettingsInput,
+            exportHostsBtn,
+            exportProfileBtn,
+            bulkImportBtn,
+            wildcardBuilderBtn,
+            domainUndoBtn,
+            importBtn,
+            exportListBtn,
+            clearBtn
+        );
         dataSection.appendChild(dataControls);
         modalBody.appendChild(dataSection);
 
@@ -8778,7 +9132,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.30';
+        footer.textContent = 'NDNS v3.4.31';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -9491,6 +9845,9 @@ function addGlobalStyle(css) {
         applyThemeStudioCss(themeStudioCss);
         applyListPageTheme();
         setupEscapeHandler();
+        if (storageDoctorReport?.repairedCount > 0) {
+            setTimeout(() => showToast(formatStorageDoctorMessage(storageDoctorReport), true, 7000), 600);
+        }
 
         const isLoggedIn = !document.querySelector('form[action="#submit"]');
 

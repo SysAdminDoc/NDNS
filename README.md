@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.4.30-7f5af0?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/version-3.4.31-7f5af0?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey%20%7C%20ScriptMonkey-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/github/license/SysAdminDoc/NDNS?style=flat-square" alt="License">
 </p>
@@ -32,7 +32,7 @@ NDNS transforms the NextDNS dashboard at [my.nextdns.io](https://my.nextdns.io) 
 | **Analytics Dashboard** | Replaces the default analytics page with custom API-driven views: stat cards, current/all-profile aggregation, 90-day / 1-year historical rollups, blocked-category spike alerts, per-device app drill-downs, ring charts (status, DNSSEC, encryption, protocols, IP versions), bar charts (top domains, blocked domains, devices), data tables, and CSV/JSON/PDF export. |
 | **Log Enhancements** | Filter by Allowed / Blocked / Cached. Hide specific domains. Compact mode. Auto-refresh with configurable interval. Real-time log counters. |
 | **Domain Management** | One-click allow/deny from logs. Domain-of-the-day review picker from loaded queries. 10-step undo stack for allow/deny actions. Bulk allowlist/denylist import. Wildcard/regex builder with recent-log preview. Protected domain tags for local curation during HaGeZi sync. Bulk delete tools with progress tracking. Domain action history. CNAME chain display. |
-| **Profile Tools** | Full profile import/export (JSON). Cross-profile config sync. DNS rewrite management from the settings modal. |
+| **Profile Tools** | Full profile import/export (JSON). Cross-profile config sync. DNS rewrite management from the settings modal. Versioned NDNS settings backup/import with storage repair reporting. |
 | **Parental Controls** | Quick-toggle parental control categories, Safe / Work / Chill bulk presets, recreation time, a local weekly 7x24 heatmap schedule, and device-activity override schedules from the settings modal. |
 | **HaGeZi Integration** | One-click sync of TLD blocklists and allowlists from HaGeZi's curated adblock lists, local hosts/AdBlock blocklist import, per-list upstream hashes, counts, diff views after updates, optional weekly auto-sync notifications, and allow/deny conflict resolution. |
 | **Webhook Alerts** | Send domain query events to Discord, Slack, or any webhook URL. Configurable filter expressions, editable Generic JSON / Discord / Slack payload templates, test sends, last-5 delivery logs, and duplicate-event rate limiting. |
@@ -108,6 +108,7 @@ node tools/firefox-parity-check.mjs
 node tools/api-retry-policy-check.mjs
 node tools/webhook-trust-policy-check.mjs
 node tools/dom-sink-policy-check.mjs
+node tools/storage-policy-check.mjs
 ```
 
 ---
