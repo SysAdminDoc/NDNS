@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.16
+// @version      3.4.17
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -4050,7 +4050,14 @@ function addGlobalStyle(css) {
                 fetchAndShowCnameChain(row);
 
                 // v3.4: Webhook alert check
-                if (domain) checkWebhookAlert(domain);
+                if (domain) {
+                    checkWebhookAlert(domain, {
+                        row,
+                        device: extractWebhookDevice(row),
+                        status: isConsideredBlocked && !isConsideredAllowed ? 'blocked' : (isConsideredAllowed ? 'allowed' : 'unknown'),
+                        timestamp: new Date()
+                    });
+                }
 
                 row.dataset.ndnsProcessed = '1';
             }
@@ -6396,20 +6403,79 @@ function addGlobalStyle(css) {
     // --- WEBHOOK/ALERT INTEGRATION ---
     const webhookSentDomains = new Set();
 
-    function checkWebhookAlert(domain) {
-        if (!webhookUrl || webhookDomains.length === 0) return;
-        if (webhookSentDomains.has(domain)) return;
-        webhookSentDomains.add(domain);
+    function matchesWebhookPattern(pattern, value) {
+        const target = String(value || '');
+        if (!target) return false;
+        try {
+            return new RegExp(pattern, 'i').test(target);
+        } catch {
+            return target.toLowerCase().includes(String(pattern || '').toLowerCase());
+        }
+    }
 
-        const matches = webhookDomains.some(wd => {
-            try {
-                return new RegExp(wd, 'i').test(domain);
-            } catch {
-                return domain.includes(wd);
+    function parseTimePart(value) {
+        const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?$/);
+        if (!match) return null;
+        const hours = Number(match[1]);
+        const minutes = Number(match[2] || 0);
+        if (hours > 23 || minutes > 59) return null;
+        return hours * 60 + minutes;
+    }
+
+    function matchesWebhookTimeWindow(windowExpr, date = new Date()) {
+        const [startRaw, endRaw] = String(windowExpr || '').split('-');
+        const start = parseTimePart(startRaw);
+        const end = parseTimePart(endRaw);
+        if (start === null || end === null) return false;
+        const now = date.getHours() * 60 + date.getMinutes();
+        return start <= end
+            ? now >= start && now <= end
+            : now >= start || now <= end;
+    }
+
+    function matchesWebhookExpression(expression, context) {
+        const tokens = String(expression || '').trim().split(/[\s;]+/).filter(Boolean);
+        if (tokens.length === 0) return false;
+
+        return tokens.every((token) => {
+            const sep = token.indexOf(':');
+            if (sep === -1) return matchesWebhookPattern(token, context.domain);
+
+            const key = token.slice(0, sep).toLowerCase();
+            const value = token.slice(sep + 1);
+            if (!value) return false;
+
+            if (key === 'domain') return matchesWebhookPattern(value, context.domain);
+            if (key === 'device') return matchesWebhookPattern(value, context.device);
+            if (key === 'status') {
+                return value.split('|').some(status => matchesWebhookPattern(status, context.status));
             }
+            if (key === 'time' || key === 'window') return matchesWebhookTimeWindow(value, context.timestamp);
+            return matchesWebhookPattern(token, context.domain);
         });
+    }
 
-        if (!matches) return;
+    function extractWebhookDevice(row) {
+        return row?.querySelector('.text-end .notranslate')?.textContent?.trim() ||
+               row?.querySelector('[data-device]')?.getAttribute('data-device') ||
+               '';
+    }
+
+    function checkWebhookAlert(domain, context = {}) {
+        if (!webhookUrl || webhookDomains.length === 0) return;
+        const payloadContext = {
+            domain,
+            device: context.device || '',
+            status: context.status || 'unknown',
+            timestamp: context.timestamp || new Date()
+        };
+        const sentKey = `${payloadContext.domain}|${payloadContext.device}|${payloadContext.status}`;
+        if (webhookSentDomains.has(sentKey)) return;
+
+        const matchedFilter = webhookDomains.find(wd => matchesWebhookExpression(wd, payloadContext));
+        if (!matchedFilter) return;
+        webhookSentDomains.add(sentKey);
+
 
         try {
             GM_xmlhttpRequest({
@@ -6419,9 +6485,12 @@ function addGlobalStyle(css) {
                 data: JSON.stringify({
                     event: 'domain_query',
                     domain: domain,
-                    timestamp: new Date().toISOString(),
+                    device: payloadContext.device,
+                    status: payloadContext.status,
+                    matchedFilter,
+                    timestamp: payloadContext.timestamp.toISOString(),
                     profile: getCurrentProfileId(),
-                    source: 'NDNS v3.4.16'
+                    source: 'NDNS v3.4.17'
                 })
             });
         } catch {}
@@ -6446,7 +6515,7 @@ function addGlobalStyle(css) {
 
         const desc = document.createElement('div');
         desc.style.cssText = 'font-size: 10px; color: var(--panel-text-secondary); margin: 4px 0;';
-        desc.textContent = 'Domains to watch (regex or substring, one per add):';
+        desc.textContent = 'Filters to watch: plain/regex domain, or AND terms like domain:ads status:blocked device:phone time:08:00-18:00.';
         container.appendChild(desc);
 
         const domainList = document.createElement('div');
@@ -6471,7 +6540,7 @@ function addGlobalStyle(css) {
         const addRow = document.createElement('div');
         addRow.style.cssText = 'display: flex; gap: 4px;';
         const addInput = document.createElement('input');
-        addInput.placeholder = 'Domain pattern to watch';
+        addInput.placeholder = 'domain:ads.* status:blocked device:phone time:08:00-18:00';
         addInput.style.cssText = 'flex: 1;';
         const addBtn = document.createElement('button');
         addBtn.className = 'ndns-panel-button ndns-btn-sm';
@@ -7125,7 +7194,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.16';
+        footer.textContent = 'NDNS v3.4.17';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
