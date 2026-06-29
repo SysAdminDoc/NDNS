@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.39
+// @version      3.4.40
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -9,6 +9,7 @@
 // @match        https://my.nextdns.io/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=nextdns.io
 // @connect      api.nextdns.io
+// @connect      dns.nextdns.io
 // @connect      raw.githubusercontent.com
 // @connect      *
 // @grant        GM_addStyle
@@ -160,6 +161,8 @@ function addGlobalStyle(css) {
     const API_RETRY_MAX_DELAY_MS = 10000;
     const NON_RETRYABLE_WRITE_METHODS = new Set(['POST']);
     const NEXTDNS_TEST_URL = 'https://test.nextdns.io';
+    const NEXTDNS_DOH_URL = 'https://dns.nextdns.io';
+    const DNS_REPLAY_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'];
     const THEME_STUDIO_MAX_CSS_BYTES = 20 * 1024;
     const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
     const OFFLINE_LOG_CACHE_DB_NAME = `${KEY_PREFIX}offline_logs_v1`;
@@ -824,6 +827,36 @@ function addGlobalStyle(css) {
         }
         .ndns-log-origin-filter.active {
             border-color: color-mix(in srgb, var(--accent-secondary) 60%, var(--panel-border));
+        }
+        .ndns-dns-replay-meta {
+            padding: 8px;
+            color: var(--panel-text-secondary);
+            background: var(--section-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 11px;
+            overflow-wrap: anywhere;
+        }
+        .ndns-dns-replay-controls {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: center;
+        }
+        .ndns-dns-replay-result {
+            min-height: 120px;
+            max-height: 280px;
+            overflow: auto;
+            padding: 10px;
+            margin: 0;
+            color: var(--panel-text);
+            background: var(--section-bg);
+            border: 1px solid var(--panel-border);
+            border-radius: 8px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 11px;
         }
 
         /* Dividers */
@@ -4895,6 +4928,7 @@ function addGlobalStyle(css) {
             createBtn('👁️', 'Hide Full', () => onHide(domain)),
             createBtn('🙈', 'Hide Root', () => onHide(rootDomain)),
             createDivider(),
+            createBtn('DNS', 'Replay DNS Query', () => showDnsReplayModal(domain)),
             createBtn('📋', 'Copy Domain', () => copyToClipboard(domain)),
             createBtn('🔍', 'Google', () => window.open(`https://www.google.com/search?q=${encodeURIComponent(domain)}`, '_blank')),
             createBtn('🕵️', 'Who.is', () => window.open(`https://www.who.is/whois/${encodeURIComponent(rootDomain)}`, '_blank'))
@@ -5028,6 +5062,179 @@ function addGlobalStyle(css) {
         wrap.append(label, input, actions, status);
         updateLogOriginFilterControls();
         return wrap;
+    }
+
+    function parseDnsJsonResponse(response) {
+        if (response?.response && typeof response.response === 'object') return response.response;
+        if (typeof response?.responseText === 'string' && response.responseText.trim()) {
+            return JSON.parse(response.responseText);
+        }
+        return {};
+    }
+
+    async function replayDnsQuery(domain, type = 'A') {
+        const profileId = getCurrentProfileId();
+        const queryDomain = normalizeImportedDomain(domain);
+        const queryType = DNS_REPLAY_TYPES.includes(String(type).toUpperCase()) ? String(type).toUpperCase() : 'A';
+
+        if (!profileId) throw new Error('Could not find Profile ID.');
+        if (!queryDomain) throw new Error('Could not find a DNS name to replay.');
+
+        const response = await gmXmlHttpRequestWithRetry({
+            method: 'GET',
+            url: `${NEXTDNS_DOH_URL}/${encodeURIComponent(profileId)}?name=${encodeURIComponent(queryDomain)}&type=${encodeURIComponent(queryType)}`,
+            headers: { Accept: 'application/dns-json' },
+            responseType: 'json',
+            timeout: 10000
+        }, { retries: 1 });
+
+        if (response.status < 200 || response.status >= 300) {
+            throw createRequestError(`${response.status}: ${response.statusText || 'DNS replay failed'}`, {
+                status: response.status,
+                statusText: response.statusText,
+                responseHeaders: response.responseHeaders || ''
+            });
+        }
+
+        return {
+            domain: queryDomain,
+            type: queryType,
+            profileId,
+            payload: parseDnsJsonResponse(response)
+        };
+    }
+
+    function getDnsReplayStatusLabel(status) {
+        const labels = {
+            0: 'NOERROR',
+            1: 'FORMERR',
+            2: 'SERVFAIL',
+            3: 'NXDOMAIN',
+            4: 'NOTIMP',
+            5: 'REFUSED'
+        };
+        const code = Number(status);
+        return `${Number.isFinite(code) ? code : '?'} ${labels[code] || 'UNKNOWN'}`;
+    }
+
+    function getDnsReplayTypeName(type) {
+        const names = {
+            1: 'A',
+            2: 'NS',
+            5: 'CNAME',
+            15: 'MX',
+            16: 'TXT',
+            28: 'AAAA'
+        };
+        return names[Number(type)] || String(type || '?');
+    }
+
+    function formatDnsReplayResult(result) {
+        const payload = result.payload || {};
+        const lines = [
+            `${result.type} ${result.domain}`,
+            `Profile: ${result.profileId}`,
+            `Status: ${getDnsReplayStatusLabel(payload.Status)}`,
+            `Flags: RD=${!!payload.RD} RA=${!!payload.RA} AD=${!!payload.AD} CD=${!!payload.CD}`
+        ];
+        const answers = Array.isArray(payload.Answer) ? payload.Answer : [];
+        if (answers.length) {
+            lines.push('', 'Answers:');
+            answers.forEach((answer) => {
+                lines.push(`- ${getDnsReplayTypeName(answer.type)} ${answer.name || result.domain} TTL ${answer.TTL ?? '?'} -> ${answer.data || ''}`);
+            });
+        } else {
+            lines.push('', 'No answers returned.');
+        }
+        const authority = Array.isArray(payload.Authority) ? payload.Authority : [];
+        if (authority.length) {
+            lines.push('', 'Authority:');
+            authority.slice(0, 5).forEach((answer) => {
+                lines.push(`- ${getDnsReplayTypeName(answer.type)} ${answer.name || ''} TTL ${answer.TTL ?? '?'} -> ${answer.data || ''}`);
+            });
+        }
+        return lines.join('\n');
+    }
+
+    function showDnsReplayModal(domain) {
+        const queryDomain = normalizeImportedDomain(domain);
+        if (!queryDomain) return showToast('Could not find a DNS name to replay.', true);
+
+        const overlay = createSafeElement('div', { className: 'ndns-profile-modal-overlay' });
+        overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
+
+        const modal = createSafeElement('div', { className: 'ndns-profile-modal' });
+        modal.style.maxWidth = '720px';
+        modal.onclick = (e) => e.stopPropagation();
+
+        const title = createSafeElement('h3', { text: 'DNS Query Replay' });
+        const help = createSafeElement('p', {
+            style: 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;',
+            text: 'Replay this query through the current profile DoH endpoint and inspect the live resolver response.'
+        });
+        const meta = createSafeElement('div', {
+            className: 'ndns-dns-replay-meta',
+            text: `${queryDomain} via ${NEXTDNS_DOH_URL}/${getCurrentProfileId() || 'profile'}`
+        });
+        const controls = createSafeElement('div', { className: 'ndns-dns-replay-controls' });
+        const typeSelect = createSafeElement('select', { attrs: { 'aria-label': 'DNS record type' } });
+        DNS_REPLAY_TYPES.forEach((recordType) => {
+            const option = createSafeElement('option', { text: recordType, attrs: { value: recordType } });
+            typeSelect.appendChild(option);
+        });
+        const runBtn = createSafeElement('button', {
+            className: 'ndns-panel-button ndns-btn-sm',
+            text: 'Run Query',
+            attrs: { type: 'button' }
+        });
+        controls.append(typeSelect, runBtn);
+
+        const status = createSafeElement('div', {
+            style: 'font-size:12px;color:var(--panel-text-secondary);min-height:18px;',
+            attrs: { role: 'status', 'aria-live': 'polite' },
+            text: 'Ready.'
+        });
+        const result = createSafeElement('pre', {
+            className: 'ndns-dns-replay-result',
+            text: 'No query run yet.'
+        });
+        const closeBtn = createSafeElement('button', {
+            className: 'ndns-panel-button danger',
+            text: uiText('cancel'),
+            attrs: { type: 'button', 'aria-label': 'Close DNS query replay' }
+        });
+
+        function closeModal() {
+            restoreDialogFocus(overlay);
+            overlay.remove();
+        }
+
+        async function runQuery() {
+            runBtn.disabled = true;
+            status.textContent = `Querying ${queryDomain} ${typeSelect.value}...`;
+            result.textContent = 'Waiting for resolver response...';
+            try {
+                const replay = await replayDnsQuery(queryDomain, typeSelect.value);
+                status.textContent = `Response received: ${getDnsReplayStatusLabel(replay.payload?.Status)}.`;
+                result.textContent = formatDnsReplayResult(replay);
+            } catch (error) {
+                status.textContent = `Replay failed: ${error.message || 'Unknown error'}`;
+                result.textContent = status.textContent;
+                showToast(status.textContent, true, 5000);
+            } finally {
+                runBtn.disabled = false;
+            }
+        }
+
+        runBtn.onclick = runQuery;
+        closeBtn.onclick = closeModal;
+
+        modal.append(title, help, meta, controls, status, result, closeBtn);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        setupDialogAccessibility(overlay, modal, 'DNS query replay');
+        focusDialog(overlay);
+        runQuery();
     }
 
     let isCleaningLogs = false; // Guard against re-entry
@@ -8916,7 +9123,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.39',
+            source: 'NDNS v3.4.40',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9981,7 +10188,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.39';
+        footer.textContent = 'NDNS v3.4.40';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
