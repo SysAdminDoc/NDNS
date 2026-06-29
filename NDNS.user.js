@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.38
+// @version      3.4.39
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -186,6 +186,7 @@ function addGlobalStyle(css) {
     let leftHeaderControls, rightHeaderControls;
     let isManuallyLocked = false;
     let filters = {};
+    let logOriginFilter = '';
     let hiddenDomains = new Set();
     let domainActions = {};
     let domainUndoStack = [];
@@ -790,6 +791,39 @@ function addGlobalStyle(css) {
         }
         .ndns-doh-refresh {
             flex: 0 0 auto;
+        }
+        .ndns-log-origin-filter {
+            gap: 7px;
+        }
+        .ndns-log-origin-filter label {
+            color: var(--panel-text-secondary);
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .ndns-log-origin-filter input {
+            width: 100%;
+            min-width: 0;
+            padding: 8px 10px;
+            color: var(--input-text);
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            font-size: 11px;
+            box-sizing: border-box;
+        }
+        .ndns-log-origin-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+        }
+        .ndns-log-origin-status {
+            color: var(--panel-text-secondary);
+            font-size: 10px;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+        .ndns-log-origin-filter.active {
+            border-color: color-mix(in srgb, var(--accent-secondary) 60%, var(--panel-border));
         }
 
         /* Dividers */
@@ -4871,6 +4905,131 @@ function addGlobalStyle(css) {
         if (targetEl) targetEl.appendChild(wrapper);
     }
 
+    function getLogOriginFilterSessionKey() {
+        return `${KEY_PREFIX}log_origin_filter_${getCurrentProfileId() || 'profile'}`;
+    }
+
+    function normalizeLogOriginFilterValue(value) {
+        return String(value || '')
+            .split(/[,;\s]+/)
+            .map(token => normalizeImportedDomain(token))
+            .filter(Boolean)
+            .filter((token, index, tokens) => tokens.indexOf(token) === index)
+            .join(', ');
+    }
+
+    function getLogOriginFilterTokens(value = logOriginFilter) {
+        return normalizeLogOriginFilterValue(value).split(', ').filter(Boolean);
+    }
+
+    function loadLogOriginFilter() {
+        try {
+            logOriginFilter = normalizeLogOriginFilterValue(sessionStorage.getItem(getLogOriginFilterSessionKey()) || '');
+        } catch {
+            logOriginFilter = '';
+        }
+    }
+
+    function isLogDomainInOriginFilter(domain, tokens = getLogOriginFilterTokens()) {
+        if (tokens.length === 0) return true;
+        const normalizedDomain = normalizeImportedDomain(domain);
+        if (!normalizedDomain) return false;
+        const rootDomain = extractRootDomain(normalizedDomain);
+        return tokens.some((token) => (
+            normalizedDomain === token ||
+            normalizedDomain.endsWith(`.${token}`) ||
+            rootDomain === token ||
+            (!token.includes('.') && normalizedDomain.includes(token))
+        ));
+    }
+
+    function updateLogOriginFilterControls() {
+        const filterSection = document.getElementById('ndns-log-origin-filter');
+        const input = document.getElementById('ndns-log-origin-filter-input');
+        const status = document.getElementById('ndns-log-origin-filter-status');
+        const clearBtn = document.getElementById('ndns-log-origin-filter-clear');
+        const tokens = getLogOriginFilterTokens();
+
+        if (filterSection) filterSection.classList.toggle('active', tokens.length > 0);
+        if (input && document.activeElement !== input) input.value = logOriginFilter;
+        if (clearBtn) clearBtn.disabled = tokens.length === 0;
+        if (status) {
+            status.textContent = tokens.length
+                ? `Tab-local origin filter: ${tokens.join(', ')}. Matching exact domains, subdomains, and root domains.`
+                : 'Tab-local origin filter off.';
+        }
+    }
+
+    function setLogOriginFilter(value) {
+        logOriginFilter = normalizeLogOriginFilterValue(value);
+        try {
+            if (logOriginFilter) sessionStorage.setItem(getLogOriginFilterSessionKey(), logOriginFilter);
+            else sessionStorage.removeItem(getLogOriginFilterSessionKey());
+        } catch {}
+        updateLogOriginFilterControls();
+        cleanLogs();
+        showToast(logOriginFilter ? `Origin filter applied: ${logOriginFilter}` : 'Origin filter cleared.', false, 2200);
+    }
+
+    function buildLogOriginFilterControls() {
+        const wrap = createSafeElement('div', {
+            id: 'ndns-log-origin-filter',
+            className: 'ndns-section ndns-log-origin-filter'
+        });
+        const label = createSafeElement('label', {
+            text: 'Tab Origin Filter',
+            attrs: { for: 'ndns-log-origin-filter-input' }
+        });
+        const input = createSafeElement('input', {
+            id: 'ndns-log-origin-filter-input',
+            attrs: {
+                type: 'text',
+                placeholder: 'example.com, ads.example.net',
+                autocomplete: 'off',
+                spellcheck: 'false',
+                'aria-label': 'Tab-local origin or domain filter'
+            }
+        });
+        input.value = logOriginFilter;
+
+        const actions = createSafeElement('div', { className: 'ndns-log-origin-actions' });
+        const applyBtn = createSafeElement('button', {
+            id: 'ndns-log-origin-filter-apply',
+            className: 'ndns-panel-button ndns-btn-sm',
+            text: 'Apply',
+            attrs: { type: 'button' }
+        });
+        const clearBtn = createSafeElement('button', {
+            id: 'ndns-log-origin-filter-clear',
+            className: 'ndns-panel-button ndns-btn-sm',
+            text: uiText('clear'),
+            attrs: { type: 'button' }
+        });
+        const status = createSafeElement('div', {
+            id: 'ndns-log-origin-filter-status',
+            className: 'ndns-log-origin-status'
+        });
+        const activeTokens = getLogOriginFilterTokens();
+        clearBtn.disabled = activeTokens.length === 0;
+        status.textContent = activeTokens.length
+            ? `Tab-local origin filter: ${activeTokens.join(', ')}. Matching exact domains, subdomains, and root domains.`
+            : 'Tab-local origin filter off.';
+
+        applyBtn.onclick = () => setLogOriginFilter(input.value);
+        clearBtn.onclick = () => {
+            input.value = '';
+            setLogOriginFilter('');
+        };
+        input.oninput = () => {
+            if (status) status.textContent = 'Apply to filter loaded rows in this dashboard tab only.';
+        };
+
+        actions.append(applyBtn, clearBtn);
+        wrap.append(label, input, actions, status);
+        updateLogOriginFilterControls();
+        return wrap;
+    }
+
     let isCleaningLogs = false; // Guard against re-entry
 
     function invalidateLogCache() {
@@ -5046,11 +5205,13 @@ function addGlobalStyle(css) {
             const isConsideredBlocked = alreadyProcessed ? row.dataset.ndnsBlocked === '1' : row.classList.contains('ndns-row-blocked');
             const isConsideredAllowed = alreadyProcessed ? row.dataset.ndnsAllowed === '1' : row.classList.contains('ndns-row-allowed');
             const hideByDomainList = filters.hideList && [...hiddenDomains].some(h => domain.includes(h));
+            const isOriginMatch = isLogDomainInOriginFilter(domain);
 
             let isVisible = true;
             if (filters.hideList && hideByDomainList) isVisible = false;
             if (filters.hideBlocked && isConsideredBlocked) isVisible = false;
             if (filters.showOnlyWhitelisted && !isConsideredAllowed) isVisible = false;
+            if (!isOriginMatch) isVisible = false;
 
             row.style.display = isVisible ? '' : 'none';
         });
@@ -5400,6 +5561,7 @@ function addGlobalStyle(css) {
                 }
             }
         });
+        updateLogOriginFilterControls();
     }
 
     function applyTheme(theme) {
@@ -8754,7 +8916,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.38',
+            source: 'NDNS v3.4.39',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9755,6 +9917,7 @@ function addGlobalStyle(css) {
         filterSection.appendChild(rawLogsBtn);
 
         content.appendChild(filterSection);
+        content.appendChild(buildLogOriginFilterControls());
 
         // --- AUTO REFRESH (only on logs page) ---
         const autoRefreshSection = document.createElement('div');
@@ -9818,7 +9981,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.38';
+        footer.textContent = 'NDNS v3.4.39';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -9833,6 +9996,7 @@ function addGlobalStyle(css) {
             // Get section elements
             const logActionSection = document.getElementById('ndns-section-logActions');
             const filterSection = document.getElementById('ndns-section-filters');
+            const originFilterSection = document.getElementById('ndns-log-origin-filter');
             const autoRefreshSection = document.getElementById('ndns-section-autoRefresh');
             const preloadSection = document.getElementById('ndns-section-preload');
             const bulkDeleteSection = document.getElementById('ndns-section-bulkDelete');
@@ -9843,6 +10007,9 @@ function addGlobalStyle(css) {
             }
             if (filterSection) {
                 filterSection.style.display = isLogsPage ? '' : 'none';
+            }
+            if (originFilterSection) {
+                originFilterSection.style.display = isLogsPage ? '' : 'none';
             }
             if (autoRefreshSection) {
                 autoRefreshSection.style.display = isLogsPage ? '' : 'none';
@@ -10566,6 +10733,7 @@ function addGlobalStyle(css) {
 
         if (globalProfileId) {
             sessionStorage.setItem('ndns_profile_id', globalProfileId);
+            loadLogOriginFilter();
             await createPanel();
             settingsModal = buildSettingsModal();
             document.body.appendChild(settingsModal);
