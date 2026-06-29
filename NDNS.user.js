@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NextDNS Ultimate Control Panel
 // @namespace    https://github.com/SysAdminDoc
-// @version      3.4.41
+// @version      3.4.42
 // @updateURL      https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @downloadURL    https://raw.githubusercontent.com/SysAdminDoc/NDNS/master/NDNS.user.js
 // @description  Enhanced control panel for NextDNS with condensed view, quick actions, and consistent UI state across pages.
@@ -166,7 +166,10 @@ function addGlobalStyle(css) {
     const THEME_STUDIO_MAX_CSS_BYTES = 20 * 1024;
     const THEME_STUDIO_BYPASS_PARAMS = ['ndns-safe-mode', 'ndnsDisableCustomCss'];
     const OFFLINE_LOG_CACHE_DB_NAME = `${KEY_PREFIX}offline_logs_v1`;
+    const OFFLINE_LOG_CACHE_STORE = 'logs';
     const OFFLINE_LOG_CACHE_TTL_DAYS = [1, 7, 14, 30];
+    const OFFLINE_LOG_CACHE_MAX_ROWS = 1000;
+    const OFFLINE_LOG_CACHE_WRITE_DEBOUNCE_MS = 1200;
     const UI_STRINGS = Object.freeze({
         analyticsDashboard: 'Analytics Dashboard',
         cancel: 'Cancel',
@@ -245,6 +248,7 @@ function addGlobalStyle(css) {
     let parentalDeviceOverrideLastErrorAt = 0;
     let storageDoctorReport = null;
     let offlineLogCachePrivacy = { enabled: false, ttlDays: 1, includeInBackups: false, lastPurged: null };
+    let offlineLogCacheWriteTimer = null;
     // SLDs for proper root domain detection (unified list used everywhere)
     const SLDs = new Set(["co", "com", "org", "edu", "gov", "mil", "net", "ac", "or", "ne", "go", "ltd"]);
 
@@ -2489,6 +2493,283 @@ function addGlobalStyle(css) {
         });
     }
 
+    function openOfflineLogCacheDb() {
+        return new Promise((resolve, reject) => {
+            if (!('indexedDB' in window)) {
+                reject(new Error('IndexedDB unavailable'));
+                return;
+            }
+            const request = indexedDB.open(OFFLINE_LOG_CACHE_DB_NAME, 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                const store = db.objectStoreNames.contains(OFFLINE_LOG_CACHE_STORE)
+                    ? request.transaction.objectStore(OFFLINE_LOG_CACHE_STORE)
+                    : db.createObjectStore(OFFLINE_LOG_CACHE_STORE, { keyPath: 'id' });
+                if (!store.indexNames.contains('profileId')) store.createIndex('profileId', 'profileId', { unique: false });
+                if (!store.indexNames.contains('cachedAt')) store.createIndex('cachedAt', 'cachedAt', { unique: false });
+                if (!store.indexNames.contains('domain')) store.createIndex('domain', 'domain', { unique: false });
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('IndexedDB open failed'));
+        });
+    }
+
+    function closeOfflineLogCacheDb(db) {
+        try { db?.close?.(); } catch {}
+    }
+
+    function getOfflineLogCacheCutoffMs() {
+        const ttlDays = OFFLINE_LOG_CACHE_TTL_DAYS.includes(offlineLogCachePrivacy.ttlDays) ? offlineLogCachePrivacy.ttlDays : 1;
+        return Date.now() - (ttlDays * 24 * 60 * 60 * 1000);
+    }
+
+    function hashOfflineLogSnapshot(value) {
+        let hash = 0;
+        const text = String(value || '');
+        for (let i = 0; i < text.length; i++) {
+            hash = ((hash << 5) - hash) + text.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash).toString(36);
+    }
+
+    function getLogRowStatus(row) {
+        const blocked = row.dataset.ndnsBlocked === '1' || row.classList.contains('ndns-row-blocked');
+        const allowed = row.dataset.ndnsAllowed === '1' || row.classList.contains('ndns-row-allowed');
+        if (blocked && !allowed) return 'blocked';
+        if (allowed) return 'allowed';
+        return 'unknown';
+    }
+
+    function buildOfflineLogSnapshot(row) {
+        const profileId = getCurrentProfileId();
+        const domain = normalizeImportedDomain(row?.dataset?.ndnsDomain || '');
+        if (!profileId || !domain) return null;
+        const status = getLogRowStatus(row);
+        const device = extractWebhookDevice(row);
+        const reason = String(row.querySelector('.ndns-reason-info')?.textContent || '').replace(/[()]/g, '').trim();
+        const rowText = String(row.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+        const fingerprint = hashOfflineLogSnapshot(`${profileId}|${domain}|${status}|${device}|${rowText}`);
+        return {
+            id: `${profileId}:${fingerprint}`,
+            profileId,
+            domain,
+            rootDomain: extractRootDomain(domain),
+            status,
+            device,
+            reason,
+            rowText,
+            cachedAt: Date.now()
+        };
+    }
+
+    async function writeOfflineLogSnapshots(snapshots) {
+        if (!snapshots.length) return { written: 0 };
+        const db = await openOfflineLogCacheDb();
+        try {
+            const cutoff = getOfflineLogCacheCutoffMs();
+            return await new Promise((resolve, reject) => {
+                const tx = db.transaction(OFFLINE_LOG_CACHE_STORE, 'readwrite');
+                const store = tx.objectStore(OFFLINE_LOG_CACHE_STORE);
+                let written = 0;
+                snapshots.forEach((snapshot) => {
+                    store.put(snapshot);
+                    written++;
+                });
+                const oldCursor = store.index('cachedAt').openCursor(IDBKeyRange.upperBound(cutoff, true));
+                oldCursor.onsuccess = () => {
+                    const cursor = oldCursor.result;
+                    if (!cursor) return;
+                    cursor.delete();
+                    cursor.continue();
+                };
+                const keyRequest = store.index('cachedAt').getAllKeys();
+                keyRequest.onsuccess = () => {
+                    const keys = keyRequest.result || [];
+                    const excess = Math.max(0, keys.length - OFFLINE_LOG_CACHE_MAX_ROWS);
+                    keys.slice(0, excess).forEach(key => store.delete(key));
+                };
+                tx.oncomplete = () => resolve({ written });
+                tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+                tx.onabort = () => reject(tx.error || new Error('IndexedDB write aborted'));
+            });
+        } finally {
+            closeOfflineLogCacheDb(db);
+        }
+    }
+
+    async function readOfflineLogSnapshots(profileId = getCurrentProfileId()) {
+        const db = await openOfflineLogCacheDb();
+        try {
+            const cutoff = getOfflineLogCacheCutoffMs();
+            return await new Promise((resolve, reject) => {
+                const tx = db.transaction(OFFLINE_LOG_CACHE_STORE, 'readonly');
+                const store = tx.objectStore(OFFLINE_LOG_CACHE_STORE);
+                const request = store.getAll();
+                request.onsuccess = () => {
+                    const rows = (request.result || [])
+                        .filter(row => (!profileId || row.profileId === profileId) && row.cachedAt >= cutoff)
+                        .sort((a, b) => b.cachedAt - a.cachedAt);
+                    resolve(rows);
+                };
+                request.onerror = () => reject(request.error || new Error('IndexedDB read failed'));
+            });
+        } finally {
+            closeOfflineLogCacheDb(db);
+        }
+    }
+
+    function updateOfflineLogCachePanelStatus(message = '') {
+        const statusEl = document.getElementById('ndns-offline-cache-panel-status');
+        if (!statusEl) return;
+        if (message) {
+            statusEl.textContent = message;
+            return;
+        }
+        statusEl.textContent = offlineLogCachePrivacy.enabled
+            ? `Caching loaded logs locally for ${offlineLogCachePrivacy.ttlDays} day(s), max ${OFFLINE_LOG_CACHE_MAX_ROWS}.`
+            : 'Offline log cache off. Enable it in Settings to save loaded rows locally.';
+    }
+
+    function scheduleOfflineLogCacheWrite() {
+        if (!offlineLogCachePrivacy.enabled || !/\/logs/.test(location.href)) return;
+        if (offlineLogCacheWriteTimer) clearTimeout(offlineLogCacheWriteTimer);
+        offlineLogCacheWriteTimer = setTimeout(async () => {
+            offlineLogCacheWriteTimer = null;
+            const snapshots = Array.from(document.querySelectorAll('div.list-group-item.log[data-ndns-processed]'))
+                .map(buildOfflineLogSnapshot)
+                .filter(Boolean);
+            if (snapshots.length === 0) return;
+            try {
+                const result = await writeOfflineLogSnapshots(snapshots);
+                updateOfflineLogCachePanelStatus(`Cached ${result.written} loaded row snapshot(s) locally.`);
+            } catch (error) {
+                updateOfflineLogCachePanelStatus(`Offline cache write failed: ${error.message || error}`);
+                console.warn('[NDNS] Offline log cache write failed:', error);
+            }
+        }, OFFLINE_LOG_CACHE_WRITE_DEBOUNCE_MS);
+    }
+
+    function buildOfflineLogCacheRow(row) {
+        const item = createSafeElement('div', {
+            style: 'display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:8px;border:1px solid var(--panel-border);border-radius:8px;background:var(--section-bg);'
+        });
+        const left = createSafeElement('div', {}, [
+            createSafeElement('div', {
+                text: row.domain,
+                title: row.domain,
+                style: 'font-family:monospace;font-size:12px;font-weight:700;overflow-wrap:anywhere;'
+            }),
+            createSafeElement('div', {
+                text: [row.status, row.device, row.reason].filter(Boolean).join(' / ') || 'unknown',
+                style: 'font-size:10px;color:var(--panel-text-secondary);margin-top:2px;'
+            })
+        ]);
+        const right = createSafeElement('div', {
+            text: new Date(row.cachedAt).toLocaleString(),
+            style: 'font-size:10px;color:var(--panel-text-secondary);text-align:right;white-space:nowrap;'
+        });
+        item.append(left, right);
+        return item;
+    }
+
+    async function showOfflineLogCacheModal() {
+        const overlay = createSafeElement('div', { className: 'ndns-profile-modal-overlay' });
+        overlay.onclick = (event) => { if (event.target === overlay) closeModal(); };
+        const modal = createSafeElement('div', { className: 'ndns-profile-modal' });
+        modal.style.maxWidth = '820px';
+        modal.onclick = event => event.stopPropagation();
+
+        const title = createSafeElement('h3', { text: 'Offline Log Cache' });
+        const help = createSafeElement('p', {
+            style: 'font-size:12px;color:var(--panel-text-secondary);margin:0 0 12px 0;',
+            text: 'Local profile-scoped snapshots of loaded log rows. This view works without network access after rows have been cached.'
+        });
+        const status = createSafeElement('div', {
+            style: 'font-size:12px;color:var(--panel-text-secondary);min-height:18px;margin-bottom:8px;',
+            attrs: { role: 'status', 'aria-live': 'polite' },
+            text: 'Loading cached rows...'
+        });
+        const list = createSafeElement('div', {
+            style: 'display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto;'
+        });
+        const actions = createSafeElement('div', { className: 'modal-actions' });
+        const refreshBtn = createSafeElement('button', { className: 'ndns-panel-button', text: uiText('refresh'), attrs: { type: 'button' } });
+        const closeBtn = createSafeElement('button', { className: 'ndns-panel-button danger', text: uiText('cancel'), attrs: { type: 'button', 'aria-label': 'Close offline log cache' } });
+
+        function closeModal() {
+            restoreDialogFocus(overlay);
+            overlay.remove();
+        }
+
+        async function renderRows() {
+            list.textContent = '';
+            status.textContent = 'Loading cached rows...';
+            try {
+                const rows = await readOfflineLogSnapshots();
+                status.textContent = rows.length
+                    ? `${rows.length} cached row snapshot(s) for this profile.`
+                    : 'No cached log rows for this profile yet.';
+                if (rows.length === 0) {
+                    list.appendChild(createSafeElement('div', {
+                        text: offlineLogCachePrivacy.enabled ? 'Load the live log page once to populate the local cache.' : 'Enable Offline Log Cache in Settings, then load logs to populate it.',
+                        style: 'font-size:12px;color:var(--panel-text-secondary);padding:10px;border:1px solid var(--panel-border);border-radius:8px;'
+                    }));
+                    return;
+                }
+                rows.slice(0, OFFLINE_LOG_CACHE_MAX_ROWS).forEach(row => list.appendChild(buildOfflineLogCacheRow(row)));
+            } catch (error) {
+                status.textContent = `Failed to read offline log cache: ${error.message || error}`;
+                list.appendChild(createSafeElement('div', {
+                    text: status.textContent,
+                    style: 'font-size:12px;color:var(--danger-color);'
+                }));
+            }
+        }
+
+        refreshBtn.onclick = renderRows;
+        closeBtn.onclick = closeModal;
+        actions.append(refreshBtn, closeBtn);
+        modal.append(title, help, status, list, actions);
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+        setupDialogAccessibility(overlay, modal, 'Offline log cache');
+        focusDialog(overlay);
+        renderRows();
+    }
+
+    function buildOfflineLogCachePanelSection() {
+        const section = createSafeElement('div', {
+            id: 'ndns-section-offline-cache',
+            className: 'ndns-section'
+        });
+        const viewBtn = createSafeElement('button', {
+            className: 'ndns-panel-button ndns-tooltip',
+            text: 'View Cached Logs',
+            attrs: { type: 'button' }
+        });
+        viewBtn.dataset.tooltip = 'Browse locally cached log rows for this profile';
+        const cacheNowBtn = createSafeElement('button', {
+            className: 'ndns-panel-button ndns-tooltip',
+            text: 'Cache Loaded Logs',
+            attrs: { type: 'button' }
+        });
+        cacheNowBtn.dataset.tooltip = 'Write currently loaded rows to the local offline cache';
+        const status = createSafeElement('div', {
+            id: 'ndns-offline-cache-panel-status',
+            className: 'ndns-log-origin-status'
+        });
+        viewBtn.onclick = showOfflineLogCacheModal;
+        cacheNowBtn.onclick = () => {
+            if (!offlineLogCachePrivacy.enabled) return showToast('Enable Offline Log Cache in Settings first.', true);
+            scheduleOfflineLogCacheWrite();
+            showToast('Offline cache write scheduled.', false, 1800);
+        };
+        section.append(viewBtn, cacheNowBtn, status);
+        setTimeout(() => updateOfflineLogCachePanelStatus(), 0);
+        return section;
+    }
+
     async function purgeOfflineLogCache(statusEl = null) {
         const result = await deleteOfflineLogCacheDatabase();
         offlineLogCachePrivacy = {
@@ -2497,6 +2778,7 @@ function addGlobalStyle(css) {
         };
         await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
         if (statusEl) statusEl.textContent = formatOfflineLogCachePrivacyStatus();
+        updateOfflineLogCachePanelStatus('Offline log cache purged.');
         showToast(result === 'blocked' ? 'Offline log cache purge is blocked by another open tab.' : 'Offline log cache purged.');
     }
 
@@ -5427,6 +5709,7 @@ function addGlobalStyle(css) {
         if (showLogCounters && logCountersElement) {
             updateLogCounters();
         }
+        scheduleOfflineLogCacheWrite();
         } finally {
             isCleaningLogs = false;
         }
@@ -9123,7 +9406,7 @@ function addGlobalStyle(css) {
             matchedFilter,
             timestamp: payloadContext.timestamp.toISOString(),
             profile: getCurrentProfileId(),
-            source: 'NDNS v3.4.41',
+            source: 'NDNS v3.4.42',
             color: payloadContext.status === 'blocked' ? 15020400 : 2926205
         };
 
@@ -9637,6 +9920,8 @@ function addGlobalStyle(css) {
             offlineCacheToggle.classList.toggle('active', offlineLogCachePrivacy.enabled);
             await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
             offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+            updateOfflineLogCachePanelStatus();
+            if (offlineLogCachePrivacy.enabled) scheduleOfflineLogCacheWrite();
             showToast(`Offline log cache ${offlineLogCachePrivacy.enabled ? 'enabled' : 'disabled'}.`);
         };
         offlineCacheRow.appendChild(offlineCacheToggle);
@@ -9657,6 +9942,8 @@ function addGlobalStyle(css) {
             offlineLogCachePrivacy.ttlDays = Number(offlineTtlSelect.value) || 1;
             await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
             offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+            updateOfflineLogCachePanelStatus();
+            if (offlineLogCachePrivacy.enabled) scheduleOfflineLogCacheWrite();
         };
         offlineTtlRow.appendChild(offlineTtlSelect);
 
@@ -9670,6 +9957,7 @@ function addGlobalStyle(css) {
             offlineBackupToggle.classList.toggle('active', offlineLogCachePrivacy.includeInBackups);
             await storage.set({ [KEY_OFFLINE_LOG_CACHE_PRIVACY]: offlineLogCachePrivacy });
             offlineCacheStatus.textContent = formatOfflineLogCachePrivacyStatus();
+            updateOfflineLogCachePanelStatus();
         };
         offlineBackupRow.appendChild(offlineBackupToggle);
 
@@ -10083,6 +10371,7 @@ function addGlobalStyle(css) {
 
         logActionSection.append(downloadLogBtn, clearLogBtn, reviewDomainBtn);
         content.appendChild(logActionSection);
+        content.appendChild(buildOfflineLogCachePanelSection());
 
         // --- FILTER BUTTONS (only on logs page) ---
         const filterSection = document.createElement('div');
@@ -10188,7 +10477,7 @@ function addGlobalStyle(css) {
         // --- PANEL FOOTER ---
         const footer = document.createElement('div');
         footer.className = 'ndns-panel-footer';
-        footer.textContent = 'NDNS v3.4.41';
+        footer.textContent = 'NDNS v3.4.42';
         panel.appendChild(footer);
 
         document.body.appendChild(panel);
@@ -10202,6 +10491,7 @@ function addGlobalStyle(css) {
 
             // Get section elements
             const logActionSection = document.getElementById('ndns-section-logActions');
+            const offlineCacheSection = document.getElementById('ndns-section-offline-cache');
             const filterSection = document.getElementById('ndns-section-filters');
             const originFilterSection = document.getElementById('ndns-log-origin-filter');
             const autoRefreshSection = document.getElementById('ndns-section-autoRefresh');
@@ -10211,6 +10501,9 @@ function addGlobalStyle(css) {
             // Log page sections: only on logs page
             if (logActionSection) {
                 logActionSection.style.display = isLogsPage ? '' : 'none';
+            }
+            if (offlineCacheSection) {
+                offlineCacheSection.style.display = isLogsPage ? '' : 'none';
             }
             if (filterSection) {
                 filterSection.style.display = isLogsPage ? '' : 'none';
